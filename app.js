@@ -301,10 +301,10 @@ app.post("/webhook", async (req, res) => {
     const accessToken = process.env.GRAPH_API_TOKEN;
     const userMessageId = message?.id;
     const userPhoneNumberForReaction = message?.from;
+    let shouldReactWithSmile = false;
     if (message && message.text && message.text.body) {
       if (message.text.body.toLowerCase().includes("sim")) {
-        const emojiToReactWith = "\uD83D\uDE00"; // Emoji de carinha feliz 😀
-        await sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken, userPhoneNumberForReaction, userMessageId, emojiToReactWith);
+        shouldReactWithSmile = true;
       }
     }
     // --- FIM: Interação WhatsApp (reação e digitando) ---
@@ -422,6 +422,11 @@ app.post("/webhook", async (req, res) => {
           bufferTimeouts.set(phoneNumber, setTimeout(async () => {
             // Enviar indicador de digitando e visto aqui, antes de processar a resposta
             await sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, userMessageId);
+            // Se necessário, enviar reação de sorriso
+            if (shouldReactWithSmile) {
+              const emojiToReactWith = "\uD83D\uDE00"; // Emoji de carinha feliz 😀
+              await sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken, userPhoneNumberForReaction, userMessageId, emojiToReactWith);
+            }
             // Recupere e concatene as mensagens
             const bufferedMessages = messageBuffers.get(phoneNumber).join(' ');
             messageBuffers.delete(phoneNumber);
