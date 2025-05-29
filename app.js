@@ -707,7 +707,7 @@ function getTimeBasedGreeting() {
   }
 }
 
-async function waitForRunCompletion(threadId, runId, maxRetries = 20, delay = 5000) {
+async function waitForRunCompletion(threadId, runId, maxRetries = 20, delay = 2000) {
   let retries = 0;
   let run = await openai.beta.threads.runs.retrieve(threadId, runId);
 
