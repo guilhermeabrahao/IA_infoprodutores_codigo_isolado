@@ -488,6 +488,13 @@ app.post("/webhook", async (req, res) => {
             const hasPessoa = userMessageLower.includes('pessoa');
             if ((hasHumano || hasPessoa) && (hasFalar || hasConversar)) {
               await sendContactMessage(whatsappBusinessPhoneNumberId, accessToken, message.from);
+              await sendReply(
+                whatsappBusinessPhoneNumberId,
+                accessToken,
+                message.from,
+                "Esse é o Guilherme, membro da nossa equipe comercial, contate-o que assim que puder ele vai te responder!",
+                null
+              );
             }
 
             // Obtenha o threadId ou crie um novo
