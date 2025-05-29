@@ -287,9 +287,12 @@ async function sendContactMessage(phone_number_id, whatsapp_token, to) {
     contacts: [
       {
         name: {
-          formatted_name: "Nutricionista NutriFy",
-          first_name: "Nutricionista",
-          last_name: "NutriFy"
+          formatted_name: "Guilherme Nobre",
+          first_name: "Guilherme",
+          last_name: "Nobre"
+        },
+        org: {
+          company: "Equipe Comercial"
         },
         phones: [
           {
@@ -479,7 +482,11 @@ app.post("/webhook", async (req, res) => {
 
             // Exemplo de uso: se a mensagem do usuário contiver a palavra 'nutricionista', envie o contato
             const userMessageLower = bufferedMessages.toLowerCase();
-            if (userMessageLower.includes('nutricionista')) {
+            const hasFalar = userMessageLower.includes('falar');
+            const hasConversar = userMessageLower.includes('conversar');
+            const hasHumano = userMessageLower.includes('humano');
+            const hasPessoa = userMessageLower.includes('pessoa');
+            if ((hasHumano || hasPessoa) && (hasFalar || hasConversar)) {
               await sendContactMessage(whatsappBusinessPhoneNumberId, accessToken, message.from);
             }
 
