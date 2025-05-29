@@ -719,7 +719,7 @@ async function waitForRunCompletion(threadId, runId, maxRetries = 20, delay = 20
   let run = await openai.beta.threads.runs.retrieve(threadId, runId);
 
   while ((run.status === 'queued' || run.status === 'in_progress') && retries < maxRetries) {
-    await new Promise(resolve => setTimeout(resolve, 5000));  // Redução do tempo de espera
+    await new Promise(resolve => setTimeout(resolve, 2000));  // Redução do tempo de espera
     run = await openai.beta.threads.runs.retrieve(threadId, runId);
     retries++;
     console.log(`Tentativa ${retries}: status do run é ${run.status}`);
