@@ -495,6 +495,7 @@ app.post("/webhook", async (req, res) => {
                 "Esse é o Guilherme, membro da nossa equipe comercial!",
                 null
               );
+              return; // Não processa mais nada, nem IA, nem Redis
             }
 
             // Obtenha o threadId ou crie um novo
