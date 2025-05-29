@@ -600,6 +600,7 @@ app.post("/webhook", async (req, res) => {
                   timestamp: Date.now()
                 });
 
+                await waitUntilNoActiveRun(threadId);
                 await addMessageWithRetry(threadId, formattedMessage);
 
                 const run = await openai.beta.threads.runs.create(threadId, {
@@ -710,6 +711,7 @@ app.post("/webhook", async (req, res) => {
                 timestamp: Date.now()
               });
 
+              await waitUntilNoActiveRun(threadId);
               await addMessageWithRetry(threadId, instruction);
 
               const run = await openai.beta.threads.runs.create(threadId, {
