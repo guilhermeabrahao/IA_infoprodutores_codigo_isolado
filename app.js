@@ -274,6 +274,51 @@ async function summarizeContext(threadId) {
   }
 }
 
+// Função para enviar um contato da equipe comercial via WhatsApp
+async function sendContactEquipeComercial(phone_number_id, whatsapp_token, to) {
+  const axios = (await import('axios')).default;
+  const apiVersion = process.env.GRAPH_API_VERSION || "v22.0";
+  const apiUrl = `https://graph.facebook.com/${apiVersion}/${phone_number_id}/messages`;
+
+  const contactPayload = {
+    messaging_product: "whatsapp",
+    to: to,
+    type: "contacts",
+    contacts: [
+      {
+        name: {
+          formatted_name: "Guilherme Nobre",
+          first_name: "Guilherme",
+          last_name: "Nobre"
+        },
+        phones: [
+          {
+            phone: "+5527996187926",
+            type: "Mobile",
+            wa_id: "5527996187926"
+          }
+        ]
+      }
+    ]
+  };
+
+  try {
+    const response = await axios.post(apiUrl, contactPayload, {
+      headers: {
+        'Authorization': `Bearer ${whatsapp_token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    console.log('Contato da equipe comercial enviado com sucesso:', response.data);
+  } catch (error) {
+    if (error.response) {
+      console.error('Erro ao enviar contato da equipe comercial:', error.response.status, error.response.data);
+    } else {
+      console.error('Erro ao enviar contato da equipe comercial:', error.message);
+    }
+  }
+}
+
 app.post("/webhook", async (req, res) => {
   try {
     const value = req.body.entry?.[0]?.changes?.[0]?.value;
@@ -432,6 +477,12 @@ app.post("/webhook", async (req, res) => {
             messageBuffers.delete(phoneNumber);
             bufferTimeouts.delete(phoneNumber);
 
+            // Exemplo de uso: se a mensagem do usuário contiver a palavra 'nutricionista', envie o contato
+            const userMessageLower = bufferedMessages.toLowerCase();
+            if (userMessageLower.includes('nutricionista')) {
+              await sendContactEquipeComercial(whatsappBusinessPhoneNumberId, accessToken, message.from);
+            }
+
             // Obtenha o threadId ou crie um novo
             let threadId = await redisClient.get(`threadId:${phoneNumber}`);
             const currentDate = moment().tz("America/Sao_Paulo").format('DD/MM/YYYY');
@@ -468,6 +519,15 @@ app.post("/webhook", async (req, res) => {
                 content: assistantResponse,
                 timestamp: Date.now()
               });
+
+              if (assistantResponse.tool_calls) {
+                for (const toolCall of assistantResponse.tool_calls) {
+                  if (toolCall.function.name === 'enviarContatoEquipeComercial') {
+                    const { to } = JSON.parse(toolCall.function.arguments);
+                    await sendContactEquipeComercial(whatsappBusinessPhoneNumberId, accessToken, to);
+                  }
+                }
+              }
 
               sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
             } else {
@@ -519,6 +579,15 @@ app.post("/webhook", async (req, res) => {
                   timestamp: Date.now()
                 });
 
+                if (assistantResponse.tool_calls) {
+                  for (const toolCall of assistantResponse.tool_calls) {
+                    if (toolCall.function.name === 'enviarContatoEquipeComercial') {
+                      const { to } = JSON.parse(toolCall.function.arguments);
+                      await sendContactEquipeComercial(whatsappBusinessPhoneNumberId, accessToken, to);
+                    }
+                  }
+                }
+
                 sendReplyWithTimeout(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
               } else {
                 console.log(`Total de tokens para o thread ${threadId} ainda está abaixo de 1.000.000.`);
@@ -547,6 +616,15 @@ app.post("/webhook", async (req, res) => {
                   content: assistantResponse,
                   timestamp: Date.now()
                 });
+
+                if (assistantResponse.tool_calls) {
+                  for (const toolCall of assistantResponse.tool_calls) {
+                    if (toolCall.function.name === 'enviarContatoEquipeComercial') {
+                      const { to } = JSON.parse(toolCall.function.arguments);
+                      await sendContactEquipeComercial(whatsappBusinessPhoneNumberId, accessToken, to);
+                    }
+                  }
+                }
 
                 sendReplyWithTimeout(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
               }
