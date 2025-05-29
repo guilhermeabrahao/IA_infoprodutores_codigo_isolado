@@ -276,6 +276,13 @@ async function summarizeContext(threadId) {
 
 app.post("/webhook", async (req, res) => {
   try {
+    const value = req.body.entry?.[0]?.changes?.[0]?.value;
+
+    // Se não houver mensagens, é um webhook de status (sent, delivered, read, etc)
+    if (!value.messages) {
+      return res.sendStatus(200); // Ignora rapidamente
+    }
+
     console.log("Webhook received:", JSON.stringify(req.body, null, 2));
     if (!req.body.object) {
       console.log("Invalid webhook object");
