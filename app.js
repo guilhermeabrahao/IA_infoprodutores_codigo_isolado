@@ -492,7 +492,7 @@ app.post("/webhook", async (req, res) => {
                 whatsappBusinessPhoneNumberId,
                 accessToken,
                 message.from,
-                "Esse é o Guilherme, membro da nossa equipe comercial, contate-o que assim que puder ele vai te responder!",
+                "Esse é o Guilherme, membro da nossa equipe comercial!",
                 null
               );
             }
