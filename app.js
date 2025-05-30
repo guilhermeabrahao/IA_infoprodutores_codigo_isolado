@@ -367,7 +367,7 @@ async function sendContactMessage(phone_number_id, whatsapp_token, to) {
 }
 
 // Handler para executar tools/function_call do assistant
-async function handleFunctionCall(functionCall, req, res, message) {
+async function handleFunctionCall(functionCall, req, res, message, threadId, runId) {
   if (functionCall.name === "enviar_contato_humano") {
     // Parâmetros vindos do assistant
     const { nome, telefone } = functionCall.arguments ? JSON.parse(functionCall.arguments) : {};
@@ -377,8 +377,19 @@ async function handleFunctionCall(functionCall, req, res, message) {
     const to = message.from;
     // Chama a função já existente
     await sendContactMessage(phone_number_id, whatsapp_token, to);
-    // Envia uma mensagem de confirmação
-    sendReply(phone_number_id, whatsapp_token, to, `Esse é o ${nome}, membro da nossa equipe comercial!`, res);
+    // Envia o resultado da tool para o OpenAI
+    await openai.beta.threads.runs.submitToolOutputs(
+      threadId,
+      runId,
+      {
+        tool_outputs: [
+          {
+            tool_call_id: functionCall.id,
+            output: `Esse é o ${nome}, membro da nossa equipe comercial!` // Mensagem de confirmação
+          }
+        ]
+      }
+    );
     return true;
   }
   return false;
@@ -594,7 +605,7 @@ app.post("/webhook", async (req, res) => {
                 assistantResponse = assistantMessage.content[0].text.value;
                 sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
               } else if (assistantMessage.content[0].type === 'function_call') {
-                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message);
+                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
               }
 
               // Armazena a mensagem do assistente
@@ -649,7 +660,7 @@ app.post("/webhook", async (req, res) => {
                   assistantResponse = assistantMessage.content[0].text.value;
                   sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
                 } else if (assistantMessage.content[0].type === 'function_call') {
-                  await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message);
+                  await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
                 }
 
                 // Armazena a mensagem do assistente
@@ -684,7 +695,7 @@ app.post("/webhook", async (req, res) => {
                   assistantResponse = assistantMessage.content[0].text.value;
                   sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
                 } else if (assistantMessage.content[0].type === 'function_call') {
-                  await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message);
+                  await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
                 }
 
                 // Armazena a mensagem do assistente
@@ -741,7 +752,7 @@ app.post("/webhook", async (req, res) => {
                 assistantResponse = assistantMessage.content[0].text.value;
                 sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
               } else if (assistantMessage.content[0].type === 'function_call') {
-                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message);
+                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
               }
 
               // Armazena a mensagem do assistente
@@ -798,7 +809,7 @@ app.post("/webhook", async (req, res) => {
                 assistantResponse = assistantMessage.content[0].text.value;
                 sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
               } else if (assistantMessage.content[0].type === 'function_call') {
-                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message);
+                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
               }
 
               // Armazena a mensagem do assistente
