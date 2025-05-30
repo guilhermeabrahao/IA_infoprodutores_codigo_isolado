@@ -121,7 +121,7 @@ async function getOrCreateAssistant() {
   // Adiciona a tool de enviar contato humano
   const assistantConfig = {
     name: "Mariana",
-    instructions: "Você é um agente de atendimento via WhatsApp. Responda de forma educada, clara e objetiva. Se o usuário pedir para falar com um humano, utilize a função 'enviar_contato_humano'.",
+    instructions: `Você é um agente de atendimento via WhatsApp. Responda de forma educada, clara e objetiva. Se o usuário pedir para falar com um humano, pedir contato, telefone, equipe comercial, ou mencionar qualquer coisa relacionada a atendimento humano, utilize SEMPRE a função 'enviar_contato_humano'. Nunca responda você mesmo, sempre acione a função quando solicitado.`,
     model: "gpt-4o",
     tools: [
       {
@@ -131,28 +131,22 @@ async function getOrCreateAssistant() {
           description: "Envia o contato de um humano do time comercial para o usuário do WhatsApp.",
           parameters: {
             type: "object",
-            properties: {
-              nome: { type: "string", description: "Nome do contato humano a ser enviado" },
-              telefone: { type: "string", description: "Telefone do contato humano no formato internacional" }
-            },
-            required: ["nome", "telefone"]
+            properties: {},
+            required: []
           }
         }
       }
     ],
   };
 
-  // Tenta buscar um assistant já criado (poderia ser persistido em Redis, mas aqui é só em memória)
-  if (assistantIdGlobal) return assistantIdGlobal;
-
-  // Cria o assistant
+  // SEMPRE cria um novo assistant para garantir tool atualizada
   const assistant = await openai.beta.assistants.create(assistantConfig);
   assistantIdGlobal = assistant.id;
   console.log("Assistant criado via código. ID:", assistantIdGlobal);
   return assistantIdGlobal;
 }
 
-// Ao iniciar a aplicação, cria o assistant (ou recupera se já existir)
+// Ao iniciar a aplicação, cria o assistant (sempre novo)
 getOrCreateAssistant().catch(e => {
   console.error("Erro ao criar assistant:", e);
   process.exit(1);
@@ -367,10 +361,8 @@ async function sendContactMessage(phone_number_id, whatsapp_token, to) {
 }
 
 // Handler para executar tools/function_call do assistant
-async function handleFunctionCall(functionCall, req, res, message, threadId, runId) {
+async function handleFunctionCall(functionCall, req, res, message, threadId, runId, toolCallId = null) {
   if (functionCall.name === "enviar_contato_humano") {
-    // Parâmetros vindos do assistant
-    const { nome, telefone } = functionCall.arguments ? JSON.parse(functionCall.arguments) : {};
     // Usa o número do usuário do WhatsApp
     const phone_number_id = req.body.entry[0].changes[0].value.metadata.phone_number_id;
     const whatsapp_token = process.env.GRAPH_API_TOKEN;
@@ -384,8 +376,8 @@ async function handleFunctionCall(functionCall, req, res, message, threadId, run
       {
         tool_outputs: [
           {
-            tool_call_id: functionCall.id,
-            output: `Esse é o ${nome}, membro da nossa equipe comercial!` // Mensagem de confirmação
+            tool_call_id: toolCallId || functionCall.id,
+            output: "Contato de Guilherme Nobre enviado." // Mensagem de confirmação
           }
         ]
       }
@@ -562,24 +554,6 @@ app.post("/webhook", async (req, res) => {
             messageBuffers.delete(phoneNumber);
             bufferTimeouts.delete(phoneNumber);
 
-            // Exemplo de uso: se a mensagem do usuário contiver a palavra 'nutricionista', envie o contato
-            const userMessageLower = bufferedMessages.toLowerCase();
-            const hasFalar = userMessageLower.includes('falar');
-            const hasConversar = userMessageLower.includes('conversar');
-            const hasHumano = userMessageLower.includes('humano');
-            const hasPessoa = userMessageLower.includes('pessoa');
-            if ((hasHumano || hasPessoa) && (hasFalar || hasConversar)) {
-              await sendContactMessage(whatsappBusinessPhoneNumberId, accessToken, message.from);
-              await sendReply(
-                whatsappBusinessPhoneNumberId,
-                accessToken,
-                message.from,
-                "Esse é o Guilherme, membro da nossa equipe comercial!",
-                null
-              );
-              return; // Não processa mais nada, nem IA, nem Redis
-            }
-
             // Obtenha o threadId ou crie um novo
             let threadId = await redisClient.get(`threadId:${phoneNumber}`);
             const currentDate = moment().tz("America/Sao_Paulo").format('DD/MM/YYYY');
@@ -610,19 +584,17 @@ app.post("/webhook", async (req, res) => {
               const messagesResponse = await openai.beta.threads.messages.list(threadId);
               const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
               let assistantResponse;
-              if (assistantMessage.content[0].type === 'function_call') {
-                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
-                // Após o submitToolOutputs, aguarde o assistant responder
-                const completedRunAfterTool = await waitForRunCompletion(threadId, run.id);
-                const messagesResponseAfterTool = await openai.beta.threads.messages.list(threadId);
-                const assistantMessageAfterTool = messagesResponseAfterTool.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
-                if (assistantMessageAfterTool) {
-                  const assistantResponse = assistantMessageAfterTool.content[0].text.value;
-                  sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-                }
-              } else if (assistantMessage.content[0].type === 'text') {
+              if (assistantMessage.content[0].type === 'text') {
                 assistantResponse = assistantMessage.content[0].text.value;
                 sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+              }
+
+              // Verificar se há tool calls
+              if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                for (const toolCall of toolCalls) {
+                  await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                }
               }
 
               // Armazena a mensagem do assistente
@@ -674,19 +646,17 @@ app.post("/webhook", async (req, res) => {
                 const messagesResponse = await openai.beta.threads.messages.list(threadId);
                 const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
                 let assistantResponse;
-                if (assistantMessage.content[0].type === 'function_call') {
-                  await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
-                  // Após o submitToolOutputs, aguarde o assistant responder
-                  const completedRunAfterTool = await waitForRunCompletion(threadId, run.id);
-                  const messagesResponseAfterTool = await openai.beta.threads.messages.list(threadId);
-                  const assistantMessageAfterTool = messagesResponseAfterTool.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
-                  if (assistantMessageAfterTool) {
-                    const assistantResponse = assistantMessageAfterTool.content[0].text.value;
-                    sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-                  }
-                } else if (assistantMessage.content[0].type === 'text') {
+                if (assistantMessage.content[0].type === 'text') {
                   assistantResponse = assistantMessage.content[0].text.value;
                   sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+                }
+
+                // Verificar se há tool calls
+                if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                  const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                  for (const toolCall of toolCalls) {
+                    await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                  }
                 }
 
                 // Armazena a mensagem do assistente
@@ -717,19 +687,17 @@ app.post("/webhook", async (req, res) => {
                 const messagesResponse = await openai.beta.threads.messages.list(threadId);
                 const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
                 let assistantResponse;
-                if (assistantMessage.content[0].type === 'function_call') {
-                  await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
-                  // Após o submitToolOutputs, aguarde o assistant responder
-                  const completedRunAfterTool = await waitForRunCompletion(threadId, run.id);
-                  const messagesResponseAfterTool = await openai.beta.threads.messages.list(threadId);
-                  const assistantMessageAfterTool = messagesResponseAfterTool.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
-                  if (assistantMessageAfterTool) {
-                    const assistantResponse = assistantMessageAfterTool.content[0].text.value;
-                    sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-                  }
-                } else if (assistantMessage.content[0].type === 'text') {
+                if (assistantMessage.content[0].type === 'text') {
                   assistantResponse = assistantMessage.content[0].text.value;
                   sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+                }
+
+                // Verificar se há tool calls
+                if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                  const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                  for (const toolCall of toolCalls) {
+                    await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                  }
                 }
 
                 // Armazena a mensagem do assistente
@@ -782,19 +750,17 @@ app.post("/webhook", async (req, res) => {
               const messagesResponse = await openai.beta.threads.messages.list(threadId);
               const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
               let assistantResponse;
-              if (assistantMessage.content[0].type === 'function_call') {
-                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
-                // Após o submitToolOutputs, aguarde o assistant responder
-                const completedRunAfterTool = await waitForRunCompletion(threadId, run.id);
-                const messagesResponseAfterTool = await openai.beta.threads.messages.list(threadId);
-                const assistantMessageAfterTool = messagesResponseAfterTool.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
-                if (assistantMessageAfterTool) {
-                  const assistantResponse = assistantMessageAfterTool.content[0].text.value;
-                  sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-                }
-              } else if (assistantMessage.content[0].type === 'text') {
+              if (assistantMessage.content[0].type === 'text') {
                 assistantResponse = assistantMessage.content[0].text.value;
                 sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+              }
+
+              // Verificar se há tool calls
+              if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                for (const toolCall of toolCalls) {
+                  await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                }
               }
 
               // Armazena a mensagem do assistente
@@ -848,7 +814,7 @@ app.post("/webhook", async (req, res) => {
               const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
               let assistantResponse;
               if (assistantMessage.content[0].type === 'function_call') {
-                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id);
+                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id, assistantMessage.content[0].id);
                 // Após o submitToolOutputs, aguarde o assistant responder
                 const completedRunAfterTool = await waitForRunCompletion(threadId, run.id);
                 const messagesResponseAfterTool = await openai.beta.threads.messages.list(threadId);
@@ -860,6 +826,14 @@ app.post("/webhook", async (req, res) => {
               } else if (assistantMessage.content[0].type === 'text') {
                 assistantResponse = assistantMessage.content[0].text.value;
                 sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+              }
+
+              // Verificar se há tool calls
+              if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                for (const toolCall of toolCalls) {
+                  await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                }
               }
 
               // Armazena a mensagem do assistente
