@@ -114,6 +114,91 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+// Definição da tool para envio do contato comercial
+const tools = [
+  {
+    type: "function",
+    function: {
+      name: "enviar_contato_comercial",
+      description: "Envia o contato do Guilherme, da equipe comercial, para o usuário interessado.",
+      parameters: {
+        type: "object",
+        properties: {
+          nome_usuario: {
+            type: "string",
+            description: "Nome do usuário, se disponível."
+          }
+        },
+        required: []
+      }
+    }
+  }
+];
+
+// Instruções personalizadas do agente
+const assistantInstructions = `
+Nome: SuportFy (mas age como \"Mariana\" - nome humano).
+Função: Atendente de suporte e vendas do Guilherme Nobre.
+Tom: Formal, educado e acolhedor, exatamente como um profissional humano.
+
+Diretrizes de Comportamento:
+Linguagem 100% humana:
+Use expressões naturais: \"Com certeza\", \"Vamos resolver isso juntos?\", \"Entendi perfeitamente\".
+Nunca mencione ser IA, algoritmos ou arquivos.
+Exemplo de resposta:
+\"Percebi que a NutriFy está repetindo mensagens? Peça a ela: 'Apagar thread_id'. Assim, reiniciamos o diagnóstico. Funciona na hora!\"
+NutriFy (Suporte Especializado):
+Se o usuário pular o diagnóstico:
+\"Antes de começar, a NutriFy precisa conhecer seu perfil. Basta pedir 'diagnóstico' que ela faz perguntas rápidas! Assim, personalizamos tudo.\"
+Dicas técnicas:
+\"Fotos ajudam, mas organize os alimentos no prato para precisão. Se preferir, descreva com texto ou áudio — ela se adapta!\"
+Vendas (Abordagem Sutil):
+Apresente soluções como sugestões:
+\"Para negócios com muitos agendamentos, temos uma IA que integra ao Google Agenda. Ela mostra horários livres e agenda sozinha, 24 horas.\"
+Fechamento:
+*\"Se interessou? O Guilherme, nosso especialista, detalha tudo: (27) 99618-7926. Posso avisá-lo que você vai entrar em contato?\"*
+Personalização:
+Use o nome do usuário se souber: \"Carlos, vi que você tem clínica. A IA de agendamento reduziria 80% do trabalho manual!\"
+Em erros: \"Pedro, essa falha é incomum. Verifico aqui para você.\"
+Emojis (raríssimos):
+Apenas despedidas (👋), se couber naturalmente.
+Exemplo: \"Ótimo falar com você! Até a próxima 👋\"
+Gestão de Conhecimento:
+Se precisar consultar base:
+\"Deixe-me verificar isso para você... [pausa implícita]. Encontrei! No caso da NutriFy, é assim...\"
+Sem respostas:
+\"Preciso confirmar com minha equipe. Retorno em 15 minutos. Pode ser?\"
+Exemplos Práticos:
+Situação\tResposta Humana
+Boas-vindas\t\"Olá, sou Mariana, da GT Automações! Como posso ajudar você hoje?\"
+Erro na NutriFy\t\"Entendo. Envie 'Apagar thread_id' para ela. Isso a reinicia. Depois, peça o diagnóstico novamente.\"
+Despedida\t\"Agradeço seu contato! Se precisar, estou disponível. Tenha um ótimo dia!\"
+Ponto crucial: O agente deve transmitir segurança e proximidade, como um colega de trabalho. Sem robótica, sem exageros
+
+Se, na mensagem que o usuário enviou, tiver alguma combinação das palavras \"falar\" ou \"conversar\" com  \"pessoa\" ou \"humano\", o código irá mandar o contato do humano automaticamente. Você deve responder apenas algo como \"Contate-o! Ele irá te responder assim que puder\".
+Caso o usuário demonstre interesse em falar com uma pessoa, porém a combinação de palavras de disparo de contato (combinação das palavras \"falar\" ou \"conversar\" com  \"pessoa\" ou \"humano\"), mande você mesmo o número do contato do Guilherme, da equipe comercial, (27)996187926
+`;
+
+// Função para criar ou obter o assistant com as tools
+let assistantId = process.env.ASSISTANT_ID;
+async function getOrCreateAssistant() {
+  if (assistantId) return assistantId;
+  // Buscar assistente existente com o nome ou criar novo
+  const existing = await openai.beta.assistants.list();
+  let assistant = existing.data.find(a => a.name === "SuportFy");
+  if (!assistant) {
+    assistant = await openai.beta.assistants.create({
+      name: "SuportFy",
+      instructions: assistantInstructions,
+      tools,
+      model: "gpt-4o"
+    });
+  }
+  assistantId = assistant.id;
+  process.env.ASSISTANT_ID = assistantId;
+  return assistantId;
+}
+
 const redisClient = redis.createClient({
   url: `redis://default:${process.env.REDIS_PASSWORD}@${process.env.REDIS_URL}`
 });
@@ -325,448 +410,121 @@ async function sendContactMessage(phone_number_id, whatsapp_token, to) {
 app.post("/webhook", async (req, res) => {
   try {
     const value = req.body.entry?.[0]?.changes?.[0]?.value;
-
-    // Se não houver mensagens, é um webhook de status (sent, delivered, read, etc)
     if (!value.messages) {
-      return res.sendStatus(200); // Ignora rapidamente
+      return res.sendStatus(200);
     }
-
-    console.log("Webhook received:", JSON.stringify(req.body, null, 2));
-    if (!req.body.object) {
-      console.log("Invalid webhook object");
-      res.sendStatus(404);
-      return;
-    }
-
     const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    console.log("Received message:", JSON.stringify(message, null, 2));
-    
     const profileName = req.body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0]?.profile?.name || 'Desconhecido';
-    console.log("Nome do perfil do usuário no WhatsApp:", profileName);
-
-    // --- INÍCIO: Interação WhatsApp (reação e digitando) ---
     const whatsappBusinessPhoneNumberId = req.body.entry[0].changes[0].value.metadata.phone_number_id;
     const accessToken = process.env.GRAPH_API_TOKEN;
     const userMessageId = message?.id;
-    const userPhoneNumberForReaction = message?.from;
-    let shouldReactWithSmile = false;
-    if (message && message.text && message.text.body) {
-      if (message.text.body.toLowerCase().includes("sim")) {
-        shouldReactWithSmile = true;
-      }
-    }
-    // --- FIM: Interação WhatsApp (reação e digitando) ---
-
     if (message && message.from) {
       const phoneNumber = normalizePhoneNumber(message.from);
-      console.log("Normalized phone number:", phoneNumber);
-
-      const existingMessageData = await redisClient.hGetAll(`message:${message.id}`);
-      console.log(`Message data in Redis for ID ${message.id}:`, existingMessageData);
-
-      if (existingMessageData && existingMessageData.timestamp && existingMessageData.timestamp === String(message.timestamp)) {
-        console.log("Mensagem duplicada ignorada.");
-        res.sendStatus(200);
-      } else {
-        // Verificar se já existe um threadId para este número de telefone
-        let threadId = await redisClient.get(`threadId:${phoneNumber}`);
-
-        // Se não houver threadId, criar um novo thread
-        if (!threadId) {
-          console.log(`Nenhum threadId encontrado para o número ${phoneNumber}, criando um novo thread...`);
-          const greeting = getTimeBasedGreeting();
-          const formattedMessage = formatMessageWithDate(`${greeting} ${message.text ? message.text.body : ''}`, message.timestamp, profileName);
-
-          const thread = await openai.beta.threads.create({
-            messages: [{ role: "user", content: formattedMessage }],
-            metadata: { phoneNumber: phoneNumber }
-          });
-
-          threadId = thread.id;
-          await redisClient.set(`threadId:${phoneNumber}`, threadId);
-          console.log(`Novo thread ID ${threadId} criado e armazenado para ${phoneNumber}`);
-        }
-
-        // Agora que o threadId está garantido, podemos salvar a mensagem no Redis
-        const messageData = {
-          id: message.id ? message.id.toString() : '', 
-          timestamp: message.timestamp ? message.timestamp.toString() : '', 
-          phoneNumber: phoneNumber ? phoneNumber.toString() : '', 
-          content: message.text && message.text.body ? message.text.body : '', 
-          assistantId: process.env.ASSISTANT_ID || '', 
-          aiPhoneNumber: process.env.AI_NUMBER || '', 
-          threadId: threadId ? threadId.toString() : '', 
-          createdAt: Date.now().toString(),
-          localTime: moment().tz("America/Sao_Paulo").format('HH:mm:ss'),  // Horário local
-          location: message.location ? { lat: message.location.latitude, long: message.location.longitude } : null,  // Geolocalização
-          type: message.type ? message.type : 'text',  // Tipo de mensagem
-          status: message.status ? message.status : 'unknown',  // Status da mensagem
-          isAutoGenerated: false,  // Mensagem manual ou automática
-          deviceInfo: message.device ? message.device : 'unknown',
-          userName: profileName  // Nome do perfil no WhatsApp
-        };
-
-        console.log("Storing message in Redis:", messageData);
-
-        await redisClient.hSet(`message:${message.id}`, {
-          id: messageData.id,
-          timestamp: messageData.timestamp,
-          phoneNumber: messageData.phoneNumber,
-          content: messageData.content,
-          assistantId: messageData.assistantId,
-          aiPhoneNumber: messageData.aiPhoneNumber,
-          threadId: messageData.threadId,
-          createdAt: messageData.createdAt,
-          localTime: messageData.localTime,
-          location: JSON.stringify(messageData.location), // Serialize the location
-          type: messageData.type,
-          status: messageData.status,
-          isAutoGenerated: JSON.stringify(messageData.isAutoGenerated), // Serialize boolean
-          deviceInfo: JSON.stringify(messageData.deviceInfo),
-          userName: messageData.userName  // Nome do perfil no WhatsApp
+      let threadId = await redisClient.get(`threadId:${phoneNumber}`);
+      if (!threadId) {
+        const greeting = getTimeBasedGreeting();
+        const formattedMessage = formatMessageWithDate(`${greeting} ${message.text ? message.text.body : ''}`, message.timestamp, profileName);
+        const thread = await openai.beta.threads.create({
+          messages: [{ role: "user", content: formattedMessage }],
+          metadata: { phoneNumber: phoneNumber }
         });
-
-        console.log(`Message ID ${message.id} added to Redis with threadId ${threadId} and timestamp ${message.timestamp}`);
-
-        // Verifique o tipo de mensagem
-        if (message.text) {
-          const userMessage = message.text.body.toLowerCase();
-
-          // Verifique se a mensagem contém "apagar thread_id"
-          if (userMessage.includes("apagar thread_id")) {
-            const threadId = await redisClient.get(`threadId:${phoneNumber}`);
-
-            if (threadId) {
-              try {
-                await openai.beta.threads.delete(threadId);
-                console.log(`Thread ${threadId} deletado no OpenAI.`);
-              } catch (error) {
-                console.error(`Erro ao deletar thread no OpenAI:`, error);
-              }
-
-              await redisClient.del(`threadId:${phoneNumber}`);
-              sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Thread ID apagado com sucesso.", res);
-            } else {
-              sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Nenhum thread ID encontrado para apagar.", res);
-            }
-
+        threadId = thread.id;
+        await redisClient.set(`threadId:${phoneNumber}`, threadId);
+      }
+      // Salva a mensagem no Redis
+      const messageData = {
+        id: message.id ? message.id.toString() : '',
+        timestamp: message.timestamp ? message.timestamp.toString() : '',
+        phoneNumber: phoneNumber ? phoneNumber.toString() : '',
+        content: message.text && message.text.body ? message.text.body : '',
+        assistantId: process.env.ASSISTANT_ID || '',
+        aiPhoneNumber: process.env.AI_NUMBER || '',
+        threadId: threadId ? threadId.toString() : '',
+        createdAt: Date.now().toString(),
+        localTime: moment().tz("America/Sao_Paulo").format('HH:mm:ss'),
+        location: message.location ? { lat: message.location.latitude, long: message.location.longitude } : null,
+        type: message.type ? message.type : 'text',
+        status: message.status ? message.status : 'unknown',
+        isAutoGenerated: false,
+        deviceInfo: message.device ? message.device : 'unknown',
+        userName: profileName
+      };
+      await redisClient.hSet(`message:${message.id}`, {
+        id: messageData.id,
+        timestamp: messageData.timestamp,
+        phoneNumber: messageData.phoneNumber,
+        content: messageData.content,
+        assistantId: messageData.assistantId,
+        aiPhoneNumber: messageData.aiPhoneNumber,
+        threadId: messageData.threadId,
+        createdAt: messageData.createdAt,
+        localTime: messageData.localTime,
+        location: JSON.stringify(messageData.location),
+        type: messageData.type,
+        status: messageData.status,
+        isAutoGenerated: JSON.stringify(messageData.isAutoGenerated),
+        deviceInfo: JSON.stringify(messageData.deviceInfo),
+        userName: messageData.userName
+      });
+      // --- NOVO FLUXO: Assistant API com tools ---
+      const assistantId = await getOrCreateAssistant();
+      // Adiciona a mensagem do usuário ao thread
+      await openai.beta.threads.messages.create(threadId, {
+        role: "user",
+        content: message.text.body
+      });
+      // Cria um run do assistant
+      const run = await openai.beta.threads.runs.create(threadId, {
+        assistant_id: assistantId
+      });
+      // Aguarda o run terminar
+      const completedRun = await waitForRunCompletion(threadId, run.id);
+      // Busca as mensagens do thread
+      const messagesResponse = await openai.beta.threads.messages.list(threadId);
+      // Busca a última mensagem do assistant
+      const lastAssistantMsg = messagesResponse.data.reverse().find(m => m.role === 'assistant');
+      // Verifica se há tool_calls
+      if (lastAssistantMsg && lastAssistantMsg.content && lastAssistantMsg.content[0] && lastAssistantMsg.content[0].tool_calls) {
+        for (const toolCall of lastAssistantMsg.content[0].tool_calls) {
+          if (toolCall.function && toolCall.function.name === 'enviar_contato_comercial') {
+            // Executa a função real de envio de contato
+            await sendContactMessage(whatsappBusinessPhoneNumberId, accessToken, message.from);
+            await sendReply(
+              whatsappBusinessPhoneNumberId,
+              accessToken,
+              message.from,
+              "Contate-o! Ele irá te responder assim que puder",
+              res
+            );
             return;
           }
-
-          // Verifique se já existe um buffer de mensagens para este telefone
-          if (!messageBuffers.has(phoneNumber)) {
-            messageBuffers.set(phoneNumber, []);
-          }
-
-          // Adicione a nova mensagem ao buffer
-          messageBuffers.get(phoneNumber).push(message.text.body);
-
-          // Se já existir um timeout ativo, limpe-o
-          if (bufferTimeouts.has(phoneNumber)) {
-            clearTimeout(bufferTimeouts.get(phoneNumber));
-          }
-
-          // Defina um novo timeout para processar as mensagens em 4 segundos
-          bufferTimeouts.set(phoneNumber, setTimeout(async () => {
-            // Enviar indicador de digitando e visto aqui, antes de processar a resposta
-            await sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, userMessageId);
-            // Se necessário, enviar reação de sorriso
-            if (shouldReactWithSmile) {
-              const emojiToReactWith = "\uD83D\uDE00"; // Emoji de carinha feliz 😀
-              await sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken, userPhoneNumberForReaction, userMessageId, emojiToReactWith);
-            }
-            // Recupere e concatene as mensagens
-            const bufferedMessages = messageBuffers.get(phoneNumber).join(' ');
-            messageBuffers.delete(phoneNumber);
-            bufferTimeouts.delete(phoneNumber);
-
-            // Exemplo de uso: se a mensagem do usuário contiver a palavra 'nutricionista', envie o contato
-            const userMessageLower = bufferedMessages.toLowerCase();
-            const hasFalar = userMessageLower.includes('falar');
-            const hasConversar = userMessageLower.includes('conversar');
-            const hasHumano = userMessageLower.includes('humano');
-            const hasPessoa = userMessageLower.includes('pessoa');
-            if ((hasHumano || hasPessoa) && (hasFalar || hasConversar)) {
-              await sendContactMessage(whatsappBusinessPhoneNumberId, accessToken, message.from);
-              await sendReply(
-                whatsappBusinessPhoneNumberId,
-                accessToken,
-                message.from,
-                "Esse é o Guilherme, membro da nossa equipe comercial!",
-                null
-              );
-              return; // Não processa mais nada, nem IA, nem Redis
-            }
-
-            // Obtenha o threadId ou crie um novo
-            let threadId = await redisClient.get(`threadId:${phoneNumber}`);
-            const currentDate = moment().tz("America/Sao_Paulo").format('DD/MM/YYYY');
-
-            if (!threadId) {
-              const greeting = getTimeBasedGreeting();
-              const formattedMessage = formatMessageWithDate(`${greeting} ${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
-              const thread = await openai.beta.threads.create({
-                messages: [{ role: "user", content: formattedMessage }],
-                metadata: { phoneNumber: phoneNumber }
-              });
-              threadId = thread.id;
-              await redisClient.set(`threadId:${phoneNumber}`, threadId);
-              console.log(`Thread ID ${threadId} criado e armazenado para ${phoneNumber}`);
-
-              // Armazena a mensagem do usuário
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'user',
-                content: formattedMessage,
-                timestamp: Date.now()
-              });
-
-              const run = await openai.beta.threads.runs.create(threadId, {
-                assistant_id: process.env.ASSISTANT_ID
-              });
-
-              const completedRun = await waitForRunCompletion(threadId, run.id);
-              const messagesResponse = await openai.beta.threads.messages.list(threadId);
-              const assistantResponse = messagesResponse.data.find(m => m.role === 'assistant').content[0].text.value;
-
-              // Armazena a mensagem do assistente
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'assistant',
-                content: assistantResponse,
-                timestamp: Date.now()
-              });
-
-              sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-            } else {
-              const totalTokens = await getTokenUsage(threadId);
-
-              if (totalTokens > 1000000) {
-                console.log(`Total de tokens excedeu 1.000.000 para o thread ${threadId}. Resumindo contexto...`);
-
-                const summarizedContext = await summarizeContext(threadId);
-
-                const newThread = await openai.beta.threads.create({
-                  messages: [
-                    { role: "user", content: "Esta é uma continuação da conversa anterior. Aqui está o resumo do contexto até agora:" },
-                    { role: "user", content: summarizedContext }
-                  ],
-                  metadata: { phoneNumber: phoneNumber }
-                });
-
-                threadId = newThread.id;
-                await redisClient.set(`threadId:${phoneNumber}`, threadId);
-                console.log(`Novo thread ID ${threadId} criado com contexto resumido para ${phoneNumber}`);
-
-                const formattedMessage = formatMessageWithDate(`${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
-
-                // Armazena a mensagem do usuário
-                await storeMessageInConversation(phoneNumber, threadId, {
-                  role: 'user',
-                  content: formattedMessage,
-                  timestamp: Date.now()
-                });
-
-                await openai.beta.threads.messages.create(threadId, {
-                  role: "user",
-                  content: formattedMessage
-                });
-
-                const run = await openai.beta.threads.runs.create(threadId, {
-                  assistant_id: process.env.ASSISTANT_ID
-                });
-
-                const completedRun = await waitForRunCompletion(threadId, run.id);
-                const messagesResponse = await openai.beta.threads.messages.list(threadId);
-                const assistantResponse = messagesResponse.data.find(m => m.role === 'assistant').content[0].text.value;
-
-                // Armazena a mensagem do assistente
-                await storeMessageInConversation(phoneNumber, threadId, {
-                  role: 'assistant',
-                  content: assistantResponse,
-                  timestamp: Date.now()
-                });
-
-                sendReplyWithTimeout(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-              } else {
-                console.log(`Total de tokens para o thread ${threadId} ainda está abaixo de 1.000.000.`);
-                const formattedMessage = formatMessageWithDate(`${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
-
-                // Armazena a mensagem do usuário
-                await storeMessageInConversation(phoneNumber, threadId, {
-                  role: 'user',
-                  content: formattedMessage,
-                  timestamp: Date.now()
-                });
-
-                await addMessageWithRetry(threadId, formattedMessage);
-
-                const run = await openai.beta.threads.runs.create(threadId, {
-                  assistant_id: process.env.ASSISTANT_ID
-                });
-
-                const completedRun = await waitForRunCompletion(threadId, run.id);
-                const messagesResponse = await openai.beta.threads.messages.list(threadId);
-                const assistantResponse = messagesResponse.data.find(m => m.role === 'assistant').content[0].text.value;
-
-                // Armazena a mensagem do assistente
-                await storeMessageInConversation(phoneNumber, threadId, {
-                  role: 'assistant',
-                  content: assistantResponse,
-                  timestamp: Date.now()
-                });
-
-                sendReplyWithTimeout(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-              }
-            }
-          }, 4000)); // Timeout de 4 segundos
-        }
-        // Se for uma mensagem de áudio
-        else if (message.audio) {
-          const mediaId = message.audio.id;
-          if (mediaId) {
-            const audioUrl = await fetchMediaUrl(mediaId);
-            const audioContent = await downloadAudio(audioUrl);
-
-            const { transcription, language } = await transcribeAudio(audioContent);
-
-            if (transcription) {
-              let threadId = await redisClient.get(`threadId:${phoneNumber}`);
-
-              if (!threadId) {
-                const greeting = getTimeBasedGreeting();
-                const thread = await openai.beta.threads.create({
-                  messages: [{ role: "user", content: `${greeting} ${transcription}` }],
-                  metadata: { phoneNumber: phoneNumber }
-                });
-                threadId = thread.id;
-                await redisClient.set(`threadId:${phoneNumber}`, threadId);
-              } else {
-                await openai.beta.threads.messages.create(threadId, { role: "user", content: transcription });
-              }
-
-              // Armazena a mensagem do usuário
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'user',
-                content: transcription,
-                timestamp: Date.now()
-              });
-
-              const run = await openai.beta.threads.runs.create(threadId, {
-                assistant_id: process.env.ASSISTANT_ID
-              });
-
-              const completedRun = await waitForRunCompletion(threadId, run.id);
-              const messagesResponse = await openai.beta.threads.messages.list(threadId);
-              const assistantResponse = messagesResponse.data.find(m => m.role === 'assistant').content[0].text.value;
-
-              // Armazena a mensagem do assistente
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'assistant',
-                content: assistantResponse,
-                timestamp: Date.now()
-              });
-
-              await sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-            } else {
-              // Caso não tenha conseguido transcrever ou tenha muito ruído
-              await sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Desculpe, por enquanto não consigo ouvir seu áudio, poderia escrever?", res);
-            }
-          } else {
-            console.error("Media ID is undefined");
-          }
-        }
-        // Tratamento de imagens
-        else if (message.image) {
-          const mediaId = message.image.id;
-          const caption = message.image.caption || "";
-          let threadId = await redisClient.get(`threadId:${phoneNumber}`);
-
-          if (mediaId) {
-            const imageUrl = await fetchMediaUrl(mediaId);
-            console.log("Image URL: ", imageUrl);
-
-            sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Recebi sua foto. Por favor, aguarde alguns instantes enquanto eu analiso! 🕵🔍", res);
-
-            const description = await processImage(imageUrl, caption);
-
-            if (description) {
-              const instruction = `Essa é a descrição da imagem foi enviada por uma outra IA para você, Ultron. Use essa descrição para gerar sua resposta. Lembre-se essa mensagem foi enviada por outra IA, não pelo usuário. Use essas informações para gerar uma resposta para ser enviada ao usuário. Essa é a descrição da imagem e legenda que o usuário incluiu (se houver): ${description}`;
-
-              // Armazena a mensagem do usuário (descrição da imagem)
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'user',
-                content: instruction,
-                timestamp: Date.now()
-              });
-
-              await addMessageWithRetry(threadId, instruction);
-
-              const run = await openai.beta.threads.runs.create(threadId, {
-                assistant_id: process.env.ASSISTANT_ID
-              });
-
-              const completedRun = await waitForRunCompletion(threadId, run.id);
-
-              const messagesResponse = await openai.beta.threads.messages.list(threadId);
-              const assistantResponse = messagesResponse.data.find(m => m.role === 'assistant').content[0].text.value;
-
-              // Armazena a mensagem do assistente
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'assistant',
-                content: assistantResponse,
-                timestamp: Date.now()
-              });
-
-              sendReplyWithTimeout(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-            }
-          } else {
-            console.error("Media ID is undefined");
-          }
-        }
-        // Tratamento de documentos PDF
-        else if (message.document && message.document.mime_type === "application/pdf") {
-          const mediaId = message.document.id;
-          let threadId = await redisClient.get(`threadId:${phoneNumber}`);
-          const mediaUrl = await fetchMediaUrl(mediaId);
-
-          sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Um momento, vou analisar o documento enviado.🕵🏻‍♂️🔍", res);
-
-          const pdfContent = await downloadPdf(mediaUrl);
-          const extractedText = await extractTextFromPdf(pdfContent);
-
-          const instruction = `Este é o texto do arquivo enviado. Responda de forma didática.`;
-          const content = `${instruction}\n\nTexto extraído do PDF:\n${extractedText}`;
-
-          if (!threadId) {
-            const greeting = getTimeBasedGreeting();
-            const thread = await openai.beta.threads.create({
-              messages: [{ role: "user", content: `${greeting} ${content}` }],
-              metadata: { phoneNumber: phoneNumber }
-            });
-            threadId = thread.id;
-            await redisClient.set(`threadId:${phoneNumber}`, threadId);
-          } else {
-            await openai.beta.threads.messages.create(threadId, {
-              role: "user",
-              content: content
-            });
-          }
-
-          // Armazena a mensagem do usuário (conteúdo do PDF)
-          await storeMessageInConversation(phoneNumber, threadId, {
-            role: 'user',
-            content: content,
-            timestamp: Date.now()
-          });
-
-          const confirmationMessage = "Documento analisado, já podemos falar sobre ele.";
-          sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, confirmationMessage, res);
         }
       }
+      // Se não houver tool_call, responde normalmente
+      if (lastAssistantMsg && lastAssistantMsg.content && lastAssistantMsg.content[0] && lastAssistantMsg.content[0].text) {
+        await sendReply(
+          whatsappBusinessPhoneNumberId,
+          accessToken,
+          message.from,
+          lastAssistantMsg.content[0].text.value,
+          res
+        );
+        return;
+      }
+      // fallback
+      await sendReply(
+        whatsappBusinessPhoneNumberId,
+        accessToken,
+        message.from,
+        "Desculpe, não consegui processar sua solicitação.",
+        res
+      );
+      return;
     } else {
       res.sendStatus(200);
     }
   } catch (error) {
-    console.error("Error during message handling:", error);
+    console.error("Error during message handling (Assistant API):", error);
     res.sendStatus(500);
   }
 });
