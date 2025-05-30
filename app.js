@@ -864,6 +864,9 @@ app.post("/webhook", async (req, res) => {
           else if (message.audio) {
             const mediaId = message.audio.id;
             if (mediaId) {
+              // Enviar indicador de visualizado e digitando, igual ao texto
+              await sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, userMessageId);
+
               const audioUrl = await fetchMediaUrl(mediaId);
               const audioContent = await downloadAudio(audioUrl);
 
