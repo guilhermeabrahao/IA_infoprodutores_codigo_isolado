@@ -551,7 +551,7 @@ app.post("/webhook", async (req, res) => {
             if ((hasHumano || hasPessoa) && (hasFalar || hasConversar)) {
               await sendContactMessage(whatsappBusinessPhoneNumberId, accessToken, message.from);
               await sendReply(
-                whatsappBusinessPhoneNumberId,
+                whatsappBusinessPhoneId,
                 accessToken,
                 message.from,
                 "Esse é o Guilherme, membro da nossa equipe comercial!",
