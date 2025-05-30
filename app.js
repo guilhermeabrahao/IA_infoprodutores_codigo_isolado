@@ -377,20 +377,13 @@ async function handleFunctionCall(functionCall, req, res, message, threadId, run
         tool_outputs: [
           {
             tool_call_id: toolCallId || functionCall.id,
-            output: "Contato de Guilherme Nobre enviado." // Mensagem de confirmação
+            output: "Contato de Guilherme Nobre enviado com sucesso."
           }
         ]
       }
     );
 
-    // Após o submitToolOutputs, aguarde o assistant responder
-    const completedRunAfterTool = await waitForRunCompletion(threadId, runId);
-    const messagesResponseAfterTool = await openai.beta.threads.messages.list(threadId);
-    const assistantMessageAfterTool = messagesResponseAfterTool.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
-    if (assistantMessageAfterTool) {
-      const assistantResponse = assistantMessageAfterTool.content[0].text.value;
-      sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-    }
+    console.log(`Tool 'enviar_contato_humano' executada com sucesso para threadId ${threadId}`);
     return true;
   }
   return false;
@@ -438,454 +431,479 @@ app.post("/webhook", async (req, res) => {
       const existingMessageData = await redisClient.hGetAll(`message:${message.id}`);
       console.log(`Message data in Redis for ID ${message.id}:`, existingMessageData);
 
-      if (existingMessageData && existingMessageData.timestamp && existingMessageData.timestamp === String(message.timestamp)) {
-        console.log("Mensagem duplicada ignorada.");
+      if (existingMessageData && Object.keys(existingMessageData).length > 0) {
+        console.log("Mensagem duplicada ignorada - já processada anteriormente.");
         res.sendStatus(200);
+        return;
       } else {
-        // Verificar se já existe um threadId para este número de telefone
-        let threadId = await redisClient.get(`threadId:${phoneNumber}`);
+        // Verificar se já há um processamento em andamento para este número
+        const processingKey = `processing:${phoneNumber}`;
+        const isProcessing = await redisClient.get(processingKey);
+        
+        if (isProcessing) {
+          console.log(`Já há um processamento em andamento para o número ${phoneNumber}. Ignorando.`);
+          return;
+        }
+        
+        // Definir flag de processamento
+        await redisClient.setEx(processingKey, 30, 'true'); // Expira em 30 segundos
+        
+        try {
+          // Obtenha o threadId ou crie um novo
+          let threadId = await redisClient.get(`threadId:${phoneNumber}`);
 
-        // Se não houver threadId, criar um novo thread
-        if (!threadId) {
-          console.log(`Nenhum threadId encontrado para o número ${phoneNumber}, criando um novo thread...`);
-          const greeting = getTimeBasedGreeting();
-          const formattedMessage = formatMessageWithDate(`${greeting} ${message.text ? message.text.body : ''}`, message.timestamp, profileName);
+          // Se não houver threadId, criar um novo thread
+          if (!threadId) {
+            console.log(`Nenhum threadId encontrado para o número ${phoneNumber}, criando um novo thread...`);
+            const greeting = getTimeBasedGreeting();
+            const formattedMessage = formatMessageWithDate(`${greeting} ${message.text ? message.text.body : ''}`, message.timestamp, profileName);
 
-          const thread = await openai.beta.threads.create({
-            messages: [{ role: "user", content: formattedMessage }],
-            metadata: { phoneNumber: phoneNumber }
+            const thread = await openai.beta.threads.create({
+              messages: [{ role: "user", content: formattedMessage }],
+              metadata: { phoneNumber: phoneNumber }
+            });
+
+            threadId = thread.id;
+            await redisClient.set(`threadId:${phoneNumber}`, threadId);
+            console.log(`Novo thread ID ${threadId} criado e armazenado para ${phoneNumber}`);
+          }
+
+          // Agora que o threadId está garantido, podemos salvar a mensagem no Redis
+          const messageData = {
+            id: message.id ? message.id.toString() : '', 
+            timestamp: message.timestamp ? message.timestamp.toString() : '', 
+            phoneNumber: phoneNumber ? phoneNumber.toString() : '', 
+            content: message.text && message.text.body ? message.text.body : '', 
+            assistantId: assistantIdGlobal, 
+            aiPhoneNumber: process.env.AI_NUMBER || '', 
+            threadId: threadId ? threadId.toString() : '', 
+            createdAt: Date.now().toString(),
+            localTime: moment().tz("America/Sao_Paulo").format('HH:mm:ss'),  // Horário local
+            location: message.location ? { lat: message.location.latitude, long: message.location.longitude } : null,  // Geolocalização
+            type: message.type ? message.type : 'text',  // Tipo de mensagem
+            status: message.status ? message.status : 'unknown',  // Status da mensagem
+            isAutoGenerated: false,  // Mensagem manual ou automática
+            deviceInfo: message.device ? message.device : 'unknown',
+            userName: profileName  // Nome do perfil no WhatsApp
+          };
+
+          console.log("Storing message in Redis:", messageData);
+
+          await redisClient.hSet(`message:${message.id}`, {
+            id: messageData.id,
+            timestamp: messageData.timestamp,
+            phoneNumber: messageData.phoneNumber,
+            content: messageData.content,
+            assistantId: messageData.assistantId,
+            aiPhoneNumber: messageData.aiPhoneNumber,
+            threadId: messageData.threadId,
+            createdAt: messageData.createdAt,
+            localTime: messageData.localTime,
+            location: JSON.stringify(messageData.location), // Serialize the location
+            type: messageData.type,
+            status: messageData.status,
+            isAutoGenerated: JSON.stringify(messageData.isAutoGenerated), // Serialize boolean
+            deviceInfo: JSON.stringify(messageData.deviceInfo),
+            userName: messageData.userName  // Nome do perfil no WhatsApp
           });
 
-          threadId = thread.id;
-          await redisClient.set(`threadId:${phoneNumber}`, threadId);
-          console.log(`Novo thread ID ${threadId} criado e armazenado para ${phoneNumber}`);
-        }
+          console.log(`Message ID ${message.id} added to Redis with threadId ${threadId} and timestamp ${message.timestamp}`);
 
-        // Agora que o threadId está garantido, podemos salvar a mensagem no Redis
-        const messageData = {
-          id: message.id ? message.id.toString() : '', 
-          timestamp: message.timestamp ? message.timestamp.toString() : '', 
-          phoneNumber: phoneNumber ? phoneNumber.toString() : '', 
-          content: message.text && message.text.body ? message.text.body : '', 
-          assistantId: assistantIdGlobal, 
-          aiPhoneNumber: process.env.AI_NUMBER || '', 
-          threadId: threadId ? threadId.toString() : '', 
-          createdAt: Date.now().toString(),
-          localTime: moment().tz("America/Sao_Paulo").format('HH:mm:ss'),  // Horário local
-          location: message.location ? { lat: message.location.latitude, long: message.location.longitude } : null,  // Geolocalização
-          type: message.type ? message.type : 'text',  // Tipo de mensagem
-          status: message.status ? message.status : 'unknown',  // Status da mensagem
-          isAutoGenerated: false,  // Mensagem manual ou automática
-          deviceInfo: message.device ? message.device : 'unknown',
-          userName: profileName  // Nome do perfil no WhatsApp
-        };
+          // Verifique o tipo de mensagem
+          if (message.text) {
+            const userMessage = message.text.body.toLowerCase();
 
-        console.log("Storing message in Redis:", messageData);
+            // Verifique se a mensagem contém "apagar thread_id"
+            if (userMessage.includes("apagar thread_id")) {
+              const threadId = await redisClient.get(`threadId:${phoneNumber}`);
 
-        await redisClient.hSet(`message:${message.id}`, {
-          id: messageData.id,
-          timestamp: messageData.timestamp,
-          phoneNumber: messageData.phoneNumber,
-          content: messageData.content,
-          assistantId: messageData.assistantId,
-          aiPhoneNumber: messageData.aiPhoneNumber,
-          threadId: messageData.threadId,
-          createdAt: messageData.createdAt,
-          localTime: messageData.localTime,
-          location: JSON.stringify(messageData.location), // Serialize the location
-          type: messageData.type,
-          status: messageData.status,
-          isAutoGenerated: JSON.stringify(messageData.isAutoGenerated), // Serialize boolean
-          deviceInfo: JSON.stringify(messageData.deviceInfo),
-          userName: messageData.userName  // Nome do perfil no WhatsApp
-        });
-
-        console.log(`Message ID ${message.id} added to Redis with threadId ${threadId} and timestamp ${message.timestamp}`);
-
-        // Verifique o tipo de mensagem
-        if (message.text) {
-          const userMessage = message.text.body.toLowerCase();
-
-          // Verifique se a mensagem contém "apagar thread_id"
-          if (userMessage.includes("apagar thread_id")) {
-            const threadId = await redisClient.get(`threadId:${phoneNumber}`);
-
-            if (threadId) {
-              try {
-                await openai.beta.threads.delete(threadId);
-                console.log(`Thread ${threadId} deletado no OpenAI.`);
-              } catch (error) {
-                console.error(`Erro ao deletar thread no OpenAI:`, error);
-              }
-
-              await redisClient.del(`threadId:${phoneNumber}`);
-              sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Thread ID apagado com sucesso.", res);
-            } else {
-              sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Nenhum thread ID encontrado para apagar.", res);
-            }
-
-            return;
-          }
-
-          // Verifique se já existe um buffer de mensagens para este telefone
-          if (!messageBuffers.has(phoneNumber)) {
-            messageBuffers.set(phoneNumber, []);
-          }
-
-          // Adicione a nova mensagem ao buffer
-          messageBuffers.get(phoneNumber).push(message.text.body);
-
-          // Se já existir um timeout ativo, limpe-o
-          if (bufferTimeouts.has(phoneNumber)) {
-            clearTimeout(bufferTimeouts.get(phoneNumber));
-          }
-
-          // Defina um novo timeout para processar as mensagens em 4 segundos
-          bufferTimeouts.set(phoneNumber, setTimeout(async () => {
-            // Enviar indicador de digitando e visto aqui, antes de processar a resposta
-            await sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, userMessageId);
-            // Se necessário, enviar reação de sorriso
-            if (shouldReactWithSmile) {
-              const emojiToReactWith = "\uD83D\uDE00"; // Emoji de carinha feliz 😀
-              await sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken, userPhoneNumberForReaction, userMessageId, emojiToReactWith);
-            }
-            // Recupere e concatene as mensagens
-            const bufferedMessages = messageBuffers.get(phoneNumber).join(' ');
-            messageBuffers.delete(phoneNumber);
-            bufferTimeouts.delete(phoneNumber);
-
-            // Obtenha o threadId ou crie um novo
-            let threadId = await redisClient.get(`threadId:${phoneNumber}`);
-            const currentDate = moment().tz("America/Sao_Paulo").format('DD/MM/YYYY');
-
-            if (!threadId) {
-              const greeting = getTimeBasedGreeting();
-              const formattedMessage = formatMessageWithDate(`${greeting} ${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
-              const thread = await openai.beta.threads.create({
-                messages: [{ role: "user", content: formattedMessage }],
-                metadata: { phoneNumber: phoneNumber }
-              });
-              threadId = thread.id;
-              await redisClient.set(`threadId:${phoneNumber}`, threadId);
-              console.log(`Thread ID ${threadId} criado e armazenado para ${phoneNumber}`);
-
-              // Armazena a mensagem do usuário
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'user',
-                content: formattedMessage,
-                timestamp: Date.now()
-              });
-
-              const run = await openai.beta.threads.runs.create(threadId, {
-                assistant_id: assistantIdGlobal
-              });
-
-              const completedRun = await waitForRunCompletion(threadId, run.id);
-              const messagesResponse = await openai.beta.threads.messages.list(threadId);
-              const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
-              let assistantResponse;
-              if (assistantMessage.content[0].type === 'text') {
-                assistantResponse = assistantMessage.content[0].text.value;
-                sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-              }
-
-              // Verificar se há tool calls
-              if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
-                const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
-                for (const toolCall of toolCalls) {
-                  await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
-                }
-              }
-
-              // Armazena a mensagem do assistente
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'assistant',
-                content: assistantResponse,
-                timestamp: Date.now()
-              });
-
-            } else {
-              const totalTokens = await getTokenUsage(threadId);
-
-              if (totalTokens > 1000000) {
-                console.log(`Total de tokens excedeu 1.000.000 para o thread ${threadId}. Resumindo contexto...`);
-
-                const summarizedContext = await summarizeContext(threadId);
-
-                const newThread = await openai.beta.threads.create({
-                  messages: [
-                    { role: "user", content: "Esta é uma continuação da conversa anterior. Aqui está o resumo do contexto até agora:" },
-                    { role: "user", content: summarizedContext }
-                  ],
-                  metadata: { phoneNumber: phoneNumber }
-                });
-
-                threadId = newThread.id;
-                await redisClient.set(`threadId:${phoneNumber}`, threadId);
-                console.log(`Novo thread ID ${threadId} criado com contexto resumido para ${phoneNumber}`);
-
-                const formattedMessage = formatMessageWithDate(`${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
-
-                // Armazena a mensagem do usuário
-                await storeMessageInConversation(phoneNumber, threadId, {
-                  role: 'user',
-                  content: formattedMessage,
-                  timestamp: Date.now()
-                });
-
-                await openai.beta.threads.messages.create(threadId, {
-                  role: "user",
-                  content: formattedMessage
-                });
-
-                const run = await openai.beta.threads.runs.create(threadId, {
-                  assistant_id: assistantIdGlobal
-                });
-
-                const completedRun = await waitForRunCompletion(threadId, run.id);
-                const messagesResponse = await openai.beta.threads.messages.list(threadId);
-                const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
-                let assistantResponse;
-                if (assistantMessage.content[0].type === 'text') {
-                  assistantResponse = assistantMessage.content[0].text.value;
-                  sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+              if (threadId) {
+                try {
+                  await openai.beta.threads.delete(threadId);
+                  console.log(`Thread ${threadId} deletado no OpenAI.`);
+                } catch (error) {
+                  console.error(`Erro ao deletar thread no OpenAI:`, error);
                 }
 
-                // Verificar se há tool calls
-                if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
-                  const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
-                  for (const toolCall of toolCalls) {
-                    await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
-                  }
-                }
-
-                // Armazena a mensagem do assistente
-                await storeMessageInConversation(phoneNumber, threadId, {
-                  role: 'assistant',
-                  content: assistantResponse,
-                  timestamp: Date.now()
-                });
-
+                await redisClient.del(`threadId:${phoneNumber}`);
+                sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Thread ID apagado com sucesso.", res);
               } else {
-                console.log(`Total de tokens para o thread ${threadId} ainda está abaixo de 1.000.000.`);
-                const formattedMessage = formatMessageWithDate(`${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
-
-                // Armazena a mensagem do usuário
-                await storeMessageInConversation(phoneNumber, threadId, {
-                  role: 'user',
-                  content: formattedMessage,
-                  timestamp: Date.now()
-                });
-
-                await addMessageWithRetry(threadId, formattedMessage);
-
-                const run = await openai.beta.threads.runs.create(threadId, {
-                  assistant_id: assistantIdGlobal
-                });
-
-                const completedRun = await waitForRunCompletion(threadId, run.id);
-                const messagesResponse = await openai.beta.threads.messages.list(threadId);
-                const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
-                let assistantResponse;
-                if (assistantMessage.content[0].type === 'text') {
-                  assistantResponse = assistantMessage.content[0].text.value;
-                  sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-                }
-
-                // Verificar se há tool calls
-                if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
-                  const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
-                  for (const toolCall of toolCalls) {
-                    await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
-                  }
-                }
-
-                // Armazena a mensagem do assistente
-                await storeMessageInConversation(phoneNumber, threadId, {
-                  role: 'assistant',
-                  content: assistantResponse,
-                  timestamp: Date.now()
-                });
-
+                sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Nenhum thread ID encontrado para apagar.", res);
               }
+
+              return;
             }
-          }, 4000)); // Timeout de 4 segundos
-        }
-        // Se for uma mensagem de áudio
-        else if (message.audio) {
-          const mediaId = message.audio.id;
-          if (mediaId) {
-            const audioUrl = await fetchMediaUrl(mediaId);
-            const audioContent = await downloadAudio(audioUrl);
 
-            const { transcription, language } = await transcribeAudio(audioContent);
+            // Verifique se já existe um buffer de mensagens para este telefone
+            if (!messageBuffers.has(phoneNumber)) {
+              messageBuffers.set(phoneNumber, []);
+            }
 
-            if (transcription) {
+            // Adicione a nova mensagem ao buffer
+            messageBuffers.get(phoneNumber).push(message.text.body);
+
+            // Se já existir um timeout ativo, limpe-o
+            if (bufferTimeouts.has(phoneNumber)) {
+              clearTimeout(bufferTimeouts.get(phoneNumber));
+            }
+
+            // Defina um novo timeout para processar as mensagens em 4 segundos
+            bufferTimeouts.set(phoneNumber, setTimeout(async () => {
+              // Enviar indicador de digitando e visto aqui, antes de processar a resposta
+              await sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, userMessageId);
+              // Se necessário, enviar reação de sorriso
+              if (shouldReactWithSmile) {
+                const emojiToReactWith = "\uD83D\uDE00"; // Emoji de carinha feliz 😀
+                await sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken, userPhoneNumberForReaction, userMessageId, emojiToReactWith);
+              }
+              // Recupere e concatene as mensagens
+              const bufferedMessages = messageBuffers.get(phoneNumber).join(' ');
+              messageBuffers.delete(phoneNumber);
+              bufferTimeouts.delete(phoneNumber);
+
+              // Obtenha o threadId ou crie um novo
               let threadId = await redisClient.get(`threadId:${phoneNumber}`);
+              const currentDate = moment().tz("America/Sao_Paulo").format('DD/MM/YYYY');
 
               if (!threadId) {
                 const greeting = getTimeBasedGreeting();
+                const formattedMessage = formatMessageWithDate(`${greeting} ${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
                 const thread = await openai.beta.threads.create({
-                  messages: [{ role: "user", content: `${greeting} ${transcription}` }],
+                  messages: [{ role: "user", content: formattedMessage }],
                   metadata: { phoneNumber: phoneNumber }
                 });
                 threadId = thread.id;
                 await redisClient.set(`threadId:${phoneNumber}`, threadId);
-              } else {
-                await openai.beta.threads.messages.create(threadId, { role: "user", content: transcription });
-              }
+                console.log(`Thread ID ${threadId} criado e armazenado para ${phoneNumber}`);
 
-              // Armazena a mensagem do usuário
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'user',
-                content: transcription,
-                timestamp: Date.now()
-              });
+                // Armazena a mensagem do usuário
+                await storeMessageInConversation(phoneNumber, threadId, {
+                  role: 'user',
+                  content: formattedMessage,
+                  timestamp: Date.now()
+                });
 
-              const run = await openai.beta.threads.runs.create(threadId, {
-                assistant_id: assistantIdGlobal
-              });
+                const run = await openai.beta.threads.runs.create(threadId, {
+                  assistant_id: assistantIdGlobal
+                });
 
-              const completedRun = await waitForRunCompletion(threadId, run.id);
-              const messagesResponse = await openai.beta.threads.messages.list(threadId);
-              const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
-              let assistantResponse;
-              if (assistantMessage.content[0].type === 'text') {
-                assistantResponse = assistantMessage.content[0].text.value;
-                sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-              }
-
-              // Verificar se há tool calls
-              if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
-                const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
-                for (const toolCall of toolCalls) {
-                  await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                const completedRun = await waitForRunCompletion(threadId, run.id);
+                
+                // Verificar se há tool calls para executar
+                if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                  const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                  for (const toolCall of toolCalls) {
+                    await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                  }
+                  // Aguardar o run completar após as tool calls
+                  await waitForRunCompletion(threadId, run.id);
                 }
-              }
 
-              // Armazena a mensagem do assistente
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'assistant',
-                content: assistantResponse,
-                timestamp: Date.now()
-              });
-
-            } else {
-              // Caso não tenha conseguido transcrever ou tenha muito ruído
-              await sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Desculpe, por enquanto não consigo ouvir seu áudio, poderia escrever?", res);
-            }
-          } else {
-            console.error("Media ID is undefined");
-          }
-        }
-        // Tratamento de imagens
-        else if (message.image) {
-          const mediaId = message.image.id;
-          const caption = message.image.caption || "";
-          let threadId = await redisClient.get(`threadId:${phoneNumber}`);
-
-          if (mediaId) {
-            const imageUrl = await fetchMediaUrl(mediaId);
-            console.log("Image URL: ", imageUrl);
-
-            sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Recebi sua foto. Por favor, aguarde alguns instantes enquanto eu analiso! 🕵🔍", res);
-
-            const description = await processImage(imageUrl, caption);
-
-            if (description) {
-              const instruction = `Essa é a descrição da imagem foi enviada por uma outra IA para você, Ultron. Use essa descrição para gerar sua resposta. Lembre-se essa mensagem foi enviada por outra IA, não pelo usuário. Use essas informações para gerar uma resposta para ser enviada ao usuário. Essa é a descrição da imagem e legenda que o usuário incluiu (se houver): ${description}`;
-
-              // Armazena a mensagem do usuário (descrição da imagem)
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'user',
-                content: instruction,
-                timestamp: Date.now()
-              });
-
-              await addMessageWithRetry(threadId, instruction);
-
-              const run = await openai.beta.threads.runs.create(threadId, {
-                assistant_id: assistantIdGlobal
-              });
-
-              const completedRun = await waitForRunCompletion(threadId, run.id);
-
-              const messagesResponse = await openai.beta.threads.messages.list(threadId);
-              const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant');
-              let assistantResponse;
-              if (assistantMessage.content[0].type === 'function_call') {
-                await handleFunctionCall(assistantMessage.content[0].function_call, req, res, message, threadId, run.id, assistantMessage.content[0].id);
-                // Após o submitToolOutputs, aguarde o assistant responder
-                const completedRunAfterTool = await waitForRunCompletion(threadId, run.id);
-                const messagesResponseAfterTool = await openai.beta.threads.messages.list(threadId);
-                const assistantMessageAfterTool = messagesResponseAfterTool.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
-                if (assistantMessageAfterTool) {
-                  const assistantResponse = assistantMessageAfterTool.content[0].text.value;
+                // Buscar a resposta final do assistant
+                const messagesResponse = await openai.beta.threads.messages.list(threadId);
+                const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
+                if (assistantMessage) {
+                  const assistantResponse = assistantMessage.content[0].text.value;
                   sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+
+                  // Armazena a mensagem do assistente
+                  await storeMessageInConversation(phoneNumber, threadId, {
+                    role: 'assistant',
+                    content: assistantResponse,
+                    timestamp: Date.now()
+                  });
                 }
-              } else if (assistantMessage.content[0].type === 'text') {
-                assistantResponse = assistantMessage.content[0].text.value;
-                sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
-              }
 
-              // Verificar se há tool calls
-              if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
-                const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
-                for (const toolCall of toolCalls) {
-                  await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+              } else {
+                const totalTokens = await getTokenUsage(threadId);
+
+                if (totalTokens > 1000000) {
+                  console.log(`Total de tokens excedeu 1.000.000 para o thread ${threadId}. Resumindo contexto...`);
+
+                  const summarizedContext = await summarizeContext(threadId);
+
+                  const newThread = await openai.beta.threads.create({
+                    messages: [
+                      { role: "user", content: "Esta é uma continuação da conversa anterior. Aqui está o resumo do contexto até agora:" },
+                      { role: "user", content: summarizedContext }
+                    ],
+                    metadata: { phoneNumber: phoneNumber }
+                  });
+
+                  threadId = newThread.id;
+                  await redisClient.set(`threadId:${phoneNumber}`, threadId);
+                  console.log(`Novo thread ID ${threadId} criado com contexto resumido para ${phoneNumber}`);
+
+                  const formattedMessage = formatMessageWithDate(`${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
+
+                  // Armazena a mensagem do usuário
+                  await storeMessageInConversation(phoneNumber, threadId, {
+                    role: 'user',
+                    content: formattedMessage,
+                    timestamp: Date.now()
+                  });
+
+                  await openai.beta.threads.messages.create(threadId, {
+                    role: "user",
+                    content: formattedMessage
+                  });
+
+                  const run = await openai.beta.threads.runs.create(threadId, {
+                    assistant_id: assistantIdGlobal
+                  });
+
+                  const completedRun = await waitForRunCompletion(threadId, run.id);
+                  
+                  // Verificar se há tool calls para executar
+                  if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                    const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                    for (const toolCall of toolCalls) {
+                      await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                    }
+                    // Aguardar o run completar após as tool calls
+                    await waitForRunCompletion(threadId, run.id);
+                  }
+
+                  // Buscar a resposta final do assistant
+                  const messagesResponse = await openai.beta.threads.messages.list(threadId);
+                  const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
+                  if (assistantMessage) {
+                    const assistantResponse = assistantMessage.content[0].text.value;
+                    sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+
+                    // Armazena a mensagem do assistente
+                    await storeMessageInConversation(phoneNumber, threadId, {
+                      role: 'assistant',
+                      content: assistantResponse,
+                      timestamp: Date.now()
+                    });
+                  }
+
+                } else {
+                  console.log(`Total de tokens para o thread ${threadId} ainda está abaixo de 1.000.000.`);
+                  const formattedMessage = formatMessageWithDate(`${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
+
+                  // Armazena a mensagem do usuário
+                  await storeMessageInConversation(phoneNumber, threadId, {
+                    role: 'user',
+                    content: formattedMessage,
+                    timestamp: Date.now()
+                  });
+
+                  await addMessageWithRetry(threadId, formattedMessage);
+
+                  const run = await openai.beta.threads.runs.create(threadId, {
+                    assistant_id: assistantIdGlobal
+                  });
+
+                  const completedRun = await waitForRunCompletion(threadId, run.id);
+                  
+                  // Verificar se há tool calls para executar
+                  if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                    const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                    for (const toolCall of toolCalls) {
+                      await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                    }
+                    // Aguardar o run completar após as tool calls
+                    await waitForRunCompletion(threadId, run.id);
+                  }
+
+                  // Buscar a resposta final do assistant
+                  const messagesResponse = await openai.beta.threads.messages.list(threadId);
+                  const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
+                  if (assistantMessage) {
+                    const assistantResponse = assistantMessage.content[0].text.value;
+                    sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+
+                    // Armazena a mensagem do assistente
+                    await storeMessageInConversation(phoneNumber, threadId, {
+                      role: 'assistant',
+                      content: assistantResponse,
+                      timestamp: Date.now()
+                    });
+                  }
+
                 }
               }
+            }, 4000)); // Timeout de 4 segundos
+          }
+          // Se for uma mensagem de áudio
+          else if (message.audio) {
+            const mediaId = message.audio.id;
+            if (mediaId) {
+              const audioUrl = await fetchMediaUrl(mediaId);
+              const audioContent = await downloadAudio(audioUrl);
 
-              // Armazena a mensagem do assistente
-              await storeMessageInConversation(phoneNumber, threadId, {
-                role: 'assistant',
-                content: assistantResponse,
-                timestamp: Date.now()
-              });
+              const { transcription, language } = await transcribeAudio(audioContent);
 
+              if (transcription) {
+                let threadId = await redisClient.get(`threadId:${phoneNumber}`);
+
+                if (!threadId) {
+                  const greeting = getTimeBasedGreeting();
+                  const thread = await openai.beta.threads.create({
+                    messages: [{ role: "user", content: `${greeting} ${transcription}` }],
+                    metadata: { phoneNumber: phoneNumber }
+                  });
+                  threadId = thread.id;
+                  await redisClient.set(`threadId:${phoneNumber}`, threadId);
+                } else {
+                  await openai.beta.threads.messages.create(threadId, { role: "user", content: transcription });
+                }
+
+                // Armazena a mensagem do usuário
+                await storeMessageInConversation(phoneNumber, threadId, {
+                  role: 'user',
+                  content: transcription,
+                  timestamp: Date.now()
+                });
+
+                const run = await openai.beta.threads.runs.create(threadId, {
+                  assistant_id: assistantIdGlobal
+                });
+
+                const completedRun = await waitForRunCompletion(threadId, run.id);
+                
+                // Verificar se há tool calls para executar
+                if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                  const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                  for (const toolCall of toolCalls) {
+                    await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                  }
+                  // Aguardar o run completar após as tool calls
+                  await waitForRunCompletion(threadId, run.id);
+                }
+
+                // Buscar a resposta final do assistant
+                const messagesResponse = await openai.beta.threads.messages.list(threadId);
+                const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
+                if (assistantMessage) {
+                  const assistantResponse = assistantMessage.content[0].text.value;
+                  sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+
+                  // Armazena a mensagem do assistente
+                  await storeMessageInConversation(phoneNumber, threadId, {
+                    role: 'assistant',
+                    content: assistantResponse,
+                    timestamp: Date.now()
+                  });
+                }
+
+              } else {
+                // Caso não tenha conseguido transcrever ou tenha muito ruído
+                await sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Desculpe, por enquanto não consigo ouvir seu áudio, poderia escrever?", res);
+              }
+            } else {
+              console.error("Media ID is undefined");
             }
-          } else {
-            console.error("Media ID is undefined");
           }
-        }
-        // Tratamento de documentos PDF
-        else if (message.document && message.document.mime_type === "application/pdf") {
-          const mediaId = message.document.id;
-          let threadId = await redisClient.get(`threadId:${phoneNumber}`);
-          const mediaUrl = await fetchMediaUrl(mediaId);
+          // Tratamento de imagens
+          else if (message.image) {
+            const mediaId = message.image.id;
+            const caption = message.image.caption || "";
+            let threadId = await redisClient.get(`threadId:${phoneNumber}`);
 
-          sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Um momento, vou analisar o documento enviado.🕵🏻‍♂️🔍", res);
+            if (mediaId) {
+              const imageUrl = await fetchMediaUrl(mediaId);
+              console.log("Image URL: ", imageUrl);
 
-          const pdfContent = await downloadPdf(mediaUrl);
-          const extractedText = await extractTextFromPdf(pdfContent);
+              sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Recebi sua foto. Por favor, aguarde alguns instantes enquanto eu analiso! 🕵🔍", res);
 
-          const instruction = `Este é o texto do arquivo enviado. Responda de forma didática.`;
-          const content = `${instruction}\n\nTexto extraído do PDF:\n${extractedText}`;
+              const description = await processImage(imageUrl, caption);
 
-          if (!threadId) {
-            const greeting = getTimeBasedGreeting();
-            const thread = await openai.beta.threads.create({
-              messages: [{ role: "user", content: `${greeting} ${content}` }],
-              metadata: { phoneNumber: phoneNumber }
-            });
-            threadId = thread.id;
-            await redisClient.set(`threadId:${phoneNumber}`, threadId);
-          } else {
-            await openai.beta.threads.messages.create(threadId, {
-              role: "user",
-              content: content
-            });
+              if (description) {
+                const instruction = `Essa é a descrição da imagem foi enviada por uma outra IA para você, Ultron. Use essa descrição para gerar sua resposta. Lembre-se essa mensagem foi enviada por outra IA, não pelo usuário. Use essas informações para gerar uma resposta para ser enviada ao usuário. Essa é a descrição da imagem e legenda que o usuário incluiu (se houver): ${description}`;
+
+                // Armazena a mensagem do usuário (descrição da imagem)
+                await storeMessageInConversation(phoneNumber, threadId, {
+                  role: 'user',
+                  content: instruction,
+                  timestamp: Date.now()
+                });
+
+                await addMessageWithRetry(threadId, instruction);
+
+                const run = await openai.beta.threads.runs.create(threadId, {
+                  assistant_id: assistantIdGlobal
+                });
+
+                const completedRun = await waitForRunCompletion(threadId, run.id);
+                
+                // Verificar se há tool calls para executar
+                if (completedRun.required_action && completedRun.required_action.type === 'submit_tool_outputs') {
+                  const toolCalls = completedRun.required_action.submit_tool_outputs.tool_calls;
+                  for (const toolCall of toolCalls) {
+                    await handleFunctionCall(toolCall.function, req, res, message, threadId, run.id, toolCall.id);
+                  }
+                  // Aguardar o run completar após as tool calls
+                  await waitForRunCompletion(threadId, run.id);
+                }
+
+                // Buscar a resposta final do assistant
+                const messagesResponse = await openai.beta.threads.messages.list(threadId);
+                const assistantMessage = messagesResponse.data.find(m => m.role === 'assistant' && m.content[0].type === 'text');
+                if (assistantMessage) {
+                  const assistantResponse = assistantMessage.content[0].text.value;
+                  sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+
+                  // Armazena a mensagem do assistente
+                  await storeMessageInConversation(phoneNumber, threadId, {
+                    role: 'assistant',
+                    content: assistantResponse,
+                    timestamp: Date.now()
+                  });
+                }
+
+              }
+            } else {
+              console.error("Media ID is undefined");
+            }
           }
+          // Tratamento de documentos PDF
+          else if (message.document && message.document.mime_type === "application/pdf") {
+            const mediaId = message.document.id;
+            let threadId = await redisClient.get(`threadId:${phoneNumber}`);
+            const mediaUrl = await fetchMediaUrl(mediaId);
 
-          // Armazena a mensagem do usuário (conteúdo do PDF)
-          await storeMessageInConversation(phoneNumber, threadId, {
-            role: 'user',
-            content: content,
-            timestamp: Date.now()
-          });
+            sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, "Um momento, vou analisar o documento enviado.🕵🏻‍♂️🔍", res);
 
-          const confirmationMessage = "Documento analisado, já podemos falar sobre ele.";
-          sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, confirmationMessage, res);
+            const pdfContent = await downloadPdf(mediaUrl);
+            const extractedText = await extractTextFromPdf(pdfContent);
+
+            const instruction = `Este é o texto do arquivo enviado. Responda de forma didática.`;
+            const content = `${instruction}\n\nTexto extraído do PDF:\n${extractedText}`;
+
+            if (!threadId) {
+              const greeting = getTimeBasedGreeting();
+              const thread = await openai.beta.threads.create({
+                messages: [{ role: "user", content: `${greeting} ${content}` }],
+                metadata: { phoneNumber: phoneNumber }
+              });
+              threadId = thread.id;
+              await redisClient.set(`threadId:${phoneNumber}`, threadId);
+            } else {
+              await openai.beta.threads.messages.create(threadId, {
+                role: "user",
+                content: content
+              });
+            }
+
+            // Armazena a mensagem do usuário (conteúdo do PDF)
+            await storeMessageInConversation(phoneNumber, threadId, {
+              role: 'user',
+              content: content,
+              timestamp: Date.now()
+            });
+
+            const confirmationMessage = "Documento analisado, já podemos falar sobre ele.";
+            sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, confirmationMessage, res);
+          }
+        } catch (error) {
+          console.error("Error during message handling:", error);
+          res.sendStatus(500);
+        } finally {
+          // Remover flag de processamento
+          await redisClient.del(processingKey);
         }
       }
     } else {
