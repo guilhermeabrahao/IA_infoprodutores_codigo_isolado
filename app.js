@@ -121,7 +121,7 @@ async function getOrCreateAssistant() {
   // Adiciona a tool de enviar contato humano
   const assistantConfig = {
     name: "Mariana",
-    instructions: `Você é um agente de atendimento via WhatsApp. Responda de forma educada, clara e objetiva. Se o usuário pedir para falar com um humano, pedir contato, telefone, equipe comercial, ou mencionar qualquer coisa relacionada a atendimento humano, utilize SEMPRE a função 'enviar_contato_humano'. Nunca responda você mesmo, sempre acione a função quando solicitado.`,
+    instructions: `Você é um agente de atendimento via WhatsApp. Responda de forma educada, clara e objetiva. Se o usuário pedir para falar com um humano, pedir contato, telefone, equipe comercial, ou mencionar qualquer coisa relacionada a atendimento humano, utilize SEMPRE a função 'enviar_contato_humano'. Se o usuário pedir link de cadastro, matrícula, pagamento, assinatura, ou qualquer link relacionado a serviços, utilize a função 'enviar_botao_cta' com as informações adequadas. Nunca responda você mesmo, sempre acione a função quando solicitado.`,
     model: "gpt-4o",
     tools: [
       {
@@ -133,6 +133,39 @@ async function getOrCreateAssistant() {
             type: "object",
             properties: {},
             required: []
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "enviar_botao_cta",
+          description: "Envia um botão interativo CTA URL para o usuário do WhatsApp com link para cadastro, matrícula, pagamento ou assinatura.",
+          parameters: {
+            type: "object",
+            properties: {
+              header_text: {
+                type: "string", 
+                description: "Texto do cabeçalho da mensagem (máximo 60 caracteres)"
+              },
+              body_text: {
+                type: "string",
+                description: "Texto principal da mensagem (máximo 1024 caracteres)"
+              },
+              button_text: {
+                type: "string",
+                description: "Texto do botão (máximo 20 caracteres)"
+              },
+              url: {
+                type: "string",
+                description: "URL que será aberta quando o botão for pressionado"
+              },
+              footer_text: {
+                type: "string",
+                description: "Texto do rodapé opcional (máximo 60 caracteres)"
+              }
+            },
+            required: ["body_text", "button_text", "url"]
           }
         }
       }
@@ -360,6 +393,70 @@ async function sendContactMessage(phone_number_id, whatsapp_token, to) {
   }
 }
 
+// Função para enviar botão CTA URL via WhatsApp
+async function sendCTAButtonMessage(phone_number_id, whatsapp_token, to, options) {
+  const axios = (await import('axios')).default;
+  const apiVersion = process.env.GRAPH_API_VERSION || "v22.0";
+  const apiUrl = `https://graph.facebook.com/${apiVersion}/${phone_number_id}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: to,
+    type: "interactive",
+    interactive: {
+      type: "cta_url",
+      // Header de imagem, se fornecido
+      ...(options.header_image_url && {
+        header: {
+          type: "image",
+          image: {
+            link: options.header_image_url // <-- Substitua aqui pelo link da imagem
+          }
+        }
+      }),
+      // Header de texto, se fornecido e não houver imagem
+      ...(options.header_text && !options.header_image_url && {
+        header: {
+          type: "text",
+          text: options.header_text
+        }
+      }),
+      body: {
+        text: options.body_text
+      },
+      action: {
+        name: "cta_url",
+        parameters: {
+          display_text: options.button_text,
+          url: options.url // <-- Substitua aqui pelo link de interesse
+        }
+      },
+      ...(options.footer_text && {
+        footer: {
+          text: options.footer_text
+        }
+      })
+    }
+  };
+
+  try {
+    const response = await axios.post(apiUrl, payload, {
+      headers: {
+        'Authorization': `Bearer ${whatsapp_token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    console.log('Botão CTA enviado com sucesso:', response.data);
+  } catch (error) {
+    if (error.response) {
+      console.error('Erro ao enviar botão CTA:', error.response.status, error.response.data);
+    } else {
+      console.error('Erro ao enviar botão CTA:', error.message);
+    }
+  }
+}
+
 // Handler para executar tools/function_call do assistant
 async function handleFunctionCall(functionCall, req, res, message, threadId, runId, toolCallId = null) {
   if (functionCall.name === "enviar_contato_humano") {
@@ -384,6 +481,42 @@ async function handleFunctionCall(functionCall, req, res, message, threadId, run
     );
 
     console.log(`Tool 'enviar_contato_humano' executada com sucesso para threadId ${threadId}`);
+    return true;
+  } else if (functionCall.name === "enviar_botao_cta") {
+    // Parsear os parâmetros da tool
+    const params = functionCall.arguments ? JSON.parse(functionCall.arguments) : {};
+    const { header_text, body_text, button_text, url, footer_text } = params;
+    
+    // Usa o número do usuário do WhatsApp
+    const phone_number_id = req.body.entry[0].changes[0].value.metadata.phone_number_id;
+    const whatsapp_token = process.env.GRAPH_API_TOKEN;
+    const to = message.from;
+    
+    // Chama a função para enviar o botão CTA
+    await sendCTAButtonMessage(phone_number_id, whatsapp_token, to, {
+      header_image_url: "https://res.cloudinary.com/duhgvbq1o/image/upload/v1745463019/logo-whatsapp_p0ylbp.png",
+      header_text,
+      body_text:"Garanta sua assinatura!",
+      button_text:"Assinar agora!",
+      url:"https://www.inoveinnovaai.com.br/",
+      footer_text
+    });
+    
+    // Envia o resultado da tool para o OpenAI
+    await openai.beta.threads.runs.submitToolOutputs(
+      threadId,
+      runId,
+      {
+        tool_outputs: [
+          {
+            tool_call_id: toolCallId || functionCall.id,
+            output: `Botão CTA enviado com sucesso. Botão: "${button_text}" - URL: ${url}`
+          }
+        ]
+      }
+    );
+
+    console.log(`Tool 'enviar_botao_cta' executada com sucesso para threadId ${threadId}`);
     return true;
   }
   return false;
@@ -1275,3 +1408,4 @@ async function isRunActive(threadId) {
 }
 
 export default app;
+
