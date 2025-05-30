@@ -494,7 +494,7 @@ async function handleFunctionCall(functionCall, req, res, message, threadId, run
     
     // Chama a função para enviar o botão CTA
     await sendCTAButtonMessage(phone_number_id, whatsapp_token, to, {
-      header_image_url: "https://res.cloudinary.com/duhgvbq1o/image/upload/v1745463019/logo-whatsapp_p0ylbp.png",
+      header_image_url: "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/ae/49/b3/ae49b350-8584-57b4-88f2-893c86b04064/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/1200x630wa.png",
       header_text,
       body_text:"Garanta sua assinatura!",
       button_text:"Assinar agora!",
