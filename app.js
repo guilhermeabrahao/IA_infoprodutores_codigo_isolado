@@ -494,10 +494,10 @@ async function handleFunctionCall(functionCall, req, res, message, threadId, run
     
     // Chama a função para enviar o botão CTA
     await sendCTAButtonMessage(phone_number_id, whatsapp_token, to, {
-      header_image_url: "https://res.cloudinary.com/duhgvbq1o/image/upload/v1745463019/logo-whatsapp_p0ylbp.png",
+      header_image_url: "https://res-console.cloudinary.com/duhgvbq1o/thumbnails/v1/image/upload/v1745463019/bG9nby13aGF0c2FwcF9wMHlsYnA=/drilldown",
       header_text,
-      body_text:"Garanta sua assinatura!",
-      button_text:"Assinar agora!",
+      body_text:"Seu acompanhamento nutricional de maior custo benefício.",
+      button_text:"Clique aqui!",
       url:"https://www.inoveinnovaai.com.br/",
       footer_text
     });
