@@ -659,7 +659,7 @@ app.post("/webhook", async (req, res) => {
                   timestamp: Date.now()
                 });
 
-                sendReplyWithTimeout(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+                sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
               } else {
                 console.log(`Total de tokens para o thread ${threadId} ainda está abaixo de 1.000.000.`);
                 const formattedMessage = formatMessageWithDate(`${bufferedMessages} [Data: ${currentDate}]`, message.timestamp, profileName);
@@ -695,7 +695,7 @@ app.post("/webhook", async (req, res) => {
                   timestamp: Date.now()
                 });
 
-                sendReplyWithTimeout(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+                sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
               }
             }
           }, 4000)); // Timeout de 4 segundos
@@ -811,7 +811,7 @@ app.post("/webhook", async (req, res) => {
                 timestamp: Date.now()
               });
 
-              sendReplyWithTimeout(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
+              sendReply(req.body.entry[0].changes[0].value.metadata.phone_number_id, process.env.GRAPH_API_TOKEN, message.from, assistantResponse, res);
             }
           } else {
             console.error("Media ID is undefined");
