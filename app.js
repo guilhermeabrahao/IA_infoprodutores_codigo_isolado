@@ -1,5 +1,4 @@
 import express from "express";
-import bodyParser from "body-parser";
 import https from "https";
 import OpenAI from "openai";
 import redis from 'redis';
@@ -29,8 +28,6 @@ async function sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, userMess
   };
 
   try {
-    console.log(`Sending typing_on (and marking as read) to: ${apiUrl} for message_id: ${userMessageId}`);
-    console.log(`With data: ${JSON.stringify(data)}`);
     console.log(`Using token: ${accessToken ? accessToken.substring(0, 10) + '...' : 'undefined'}`);
 
     const response = await axios.post(apiUrl, data, {
@@ -39,7 +36,6 @@ async function sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, userMess
         'Content-Type': 'application/json'
       }
     });
-    console.log(`Typing indicator 'typing_on' (and marked as read) sent for message_id ${userMessageId}. Response status: ${response.status}, data: ${JSON.stringify(response.data)}`);
   } catch (error) {
     if (error.response) {
       console.error(`Error sending typing_on indicator for message_id ${userMessageId}. Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
@@ -49,13 +45,6 @@ async function sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, userMess
   }
 }
 
-// Mantém o "digitando" ativo até sinal de parada
-async function keepTypingIndicatorActive(whatsappBusinessPhoneNumberId, accessToken, messageId, stopSignal) {
-  while (!stopSignal.stopped) {
-    await sendTypingOn(whatsappBusinessPhoneNumberId, accessToken, messageId);
-    await new Promise(resolve => setTimeout(resolve, 5000));
-  }
-}
 
 // Função para enviar reação (emoji) para uma mensagem
 async function sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken, userPhoneNumber, messageId, emoji) {
@@ -73,8 +62,6 @@ async function sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken,
   };
 
   try {
-    console.log(`Sending reaction to: ${apiUrl} for message_id: ${messageId} to user: ${userPhoneNumber}`);
-    console.log(`With data: ${JSON.stringify(data)}`);
     console.log(`Using token: ${accessToken ? accessToken.substring(0, 10) + '...' : 'undefined'}`);
 
     const response = await axios.post(apiUrl, data, {
@@ -83,7 +70,6 @@ async function sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken,
         'Content-Type': 'application/json'
       }
     });
-    console.log(`Reaction sent for message_id ${messageId}. Response status: ${response.status}, data: ${JSON.stringify(response.data)}`);
   } catch (error) {
     if (error.response) {
       console.error(`Error sending reaction for message_id ${messageId}. Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
@@ -94,12 +80,8 @@ async function sendReactionToMessage(whatsappBusinessPhoneNumberId, accessToken,
   }
 }
 
-function getCurrentDate() {
-  return moment().tz("America/Sao_Paulo").format('DD/MM/YYYY');
-}
-
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 app.set('trust proxy', 1);
 
 const limiter = rateLimit({
@@ -122,7 +104,7 @@ async function getOrCreateAssistant() {
   const assistantConfig = {
     name: "Mariana",
     instructions: `Você é um agente de atendimento via WhatsApp. Responda de forma educada, clara e objetiva. Se o usuário pedir para falar com um humano, pedir contato, telefone, equipe comercial, ou mencionar qualquer coisa relacionada a atendimento humano, utilize SEMPRE a função 'enviar_contato_humano'. Se o usuário pedir link de cadastro, matrícula, pagamento, assinatura, ou qualquer link relacionado a serviços, utilize a função 'enviar_botao_cta' com as informações adequadas. Nunca responda você mesmo, sempre acione a função quando solicitado.`,
-    model: "gpt-4o",
+    model: "gpt-4o-mini",
     tools: [
       {
         type: "function",
@@ -156,16 +138,12 @@ async function getOrCreateAssistant() {
                 type: "string",
                 description: "Texto do botão (máximo 20 caracteres)"
               },
-              url: {
-                type: "string",
-                description: "URL que será aberta quando o botão for pressionado"
-              },
               footer_text: {
                 type: "string",
                 description: "Texto do rodapé opcional (máximo 60 caracteres)"
               }
             },
-            required: ["body_text", "button_text", "url"]
+            required: ["body_text", "button_text"]
           }
         }
       }
@@ -347,7 +325,6 @@ async function summarizeContext(threadId) {
 
 // Função para enviar um contato via WhatsApp
 async function sendContactMessage(phone_number_id, whatsapp_token, to) {
-  const axios = (await import('axios')).default;
   const apiVersion = process.env.GRAPH_API_VERSION || "v22.0";
   const apiUrl = `https://graph.facebook.com/${apiVersion}/${phone_number_id}/messages`;
 
@@ -383,7 +360,7 @@ async function sendContactMessage(phone_number_id, whatsapp_token, to) {
         'Content-Type': 'application/json'
       }
     });
-    console.log('Contato enviado com sucesso:', response.data);
+    console.log('Contato enviado com sucesso');
   } catch (error) {
     if (error.response) {
       console.error('Erro ao enviar contato:', error.response.status, error.response.data);
@@ -395,7 +372,6 @@ async function sendContactMessage(phone_number_id, whatsapp_token, to) {
 
 // Função para enviar botão CTA URL via WhatsApp
 async function sendCTAButtonMessage(phone_number_id, whatsapp_token, to, options) {
-  const axios = (await import('axios')).default;
   const apiVersion = process.env.GRAPH_API_VERSION || "v22.0";
   const apiUrl = `https://graph.facebook.com/${apiVersion}/${phone_number_id}/messages`;
 
@@ -411,7 +387,7 @@ async function sendCTAButtonMessage(phone_number_id, whatsapp_token, to, options
         header: {
           type: "image",
           image: {
-            link: options.header_image_url // <-- Substitua aqui pelo link da imagem
+            link: options.header_image_url
           }
         }
       }),
@@ -429,7 +405,7 @@ async function sendCTAButtonMessage(phone_number_id, whatsapp_token, to, options
         name: "cta_url",
         parameters: {
           display_text: options.button_text,
-          url: options.url // <-- Substitua aqui pelo link de interesse
+          url: "https://www.inoveinnovaai.com.br/"
         }
       },
       ...(options.footer_text && {
@@ -447,7 +423,7 @@ async function sendCTAButtonMessage(phone_number_id, whatsapp_token, to, options
         'Content-Type': 'application/json'
       }
     });
-    console.log('Botão CTA enviado com sucesso:', response.data);
+    console.log('Botão CTA enviado com sucesso');
   } catch (error) {
     if (error.response) {
       console.error('Erro ao enviar botão CTA:', error.response.status, error.response.data);
@@ -485,7 +461,7 @@ async function handleFunctionCall(functionCall, req, res, message, threadId, run
   } else if (functionCall.name === "enviar_botao_cta") {
     // Parsear os parâmetros da tool
     const params = functionCall.arguments ? JSON.parse(functionCall.arguments) : {};
-    const { header_text, body_text, button_text, url, footer_text } = params;
+    const { header_text, body_text, button_text, footer_text } = params;
     
     // Usa o número do usuário do WhatsApp
     const phone_number_id = req.body.entry[0].changes[0].value.metadata.phone_number_id;
@@ -496,9 +472,8 @@ async function handleFunctionCall(functionCall, req, res, message, threadId, run
     await sendCTAButtonMessage(phone_number_id, whatsapp_token, to, {
       header_image_url: "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/ae/49/b3/ae49b350-8584-57b4-88f2-893c86b04064/AppIcon-0-0-1x_U007emarketing-0-11-0-85-220.png/1200x630wa.png",
       header_text,
-      body_text:"Garanta sua assinatura!",
-      button_text:"Assinar agora!",
-      url:"https://www.inoveinnovaai.com.br/",
+      body_text,
+      button_text,
       footer_text
     });
     
@@ -510,7 +485,7 @@ async function handleFunctionCall(functionCall, req, res, message, threadId, run
         tool_outputs: [
           {
             tool_call_id: toolCallId || functionCall.id,
-            output: `Botão CTA enviado com sucesso. Botão: "${button_text}" - URL: ${url}`
+            output: `Botão CTA enviado com sucesso. Botão: "${button_text}" - URL: https://www.inoveinnovaai.com.br/`
           }
         ]
       }
@@ -1182,32 +1157,6 @@ app.get('/audio/:filename', (req, res) => {
   }
 });
 
-// Nova função para enviar resposta com timeout
-async function sendReplyWithTimeout(phone_number_id, whatsapp_token, to, reply_message, resp, delayMessage = "Hmm, só um instante...") {
-  let isReplySent = false;
-
-  // Envia a mensagem de atraso após 2 segundos, a menos que a resposta já tenha sido enviada
-  const delayTimeout = setTimeout(() => {
-    if (!isReplySent) {
-      sendReply(phone_number_id, whatsapp_token, to, delayMessage, null);
-    }
-  }, 2000);
-
-  // Função que será chamada quando a resposta da IA for obtida
-  const sendFinalReply = (finalMessage) => {
-    clearTimeout(delayTimeout);
-    sendReply(phone_number_id, whatsapp_token, to, finalMessage, resp);
-    isReplySent = true;
-  };
-
-  // Aqui você chama a função que obtém a resposta da OpenAI
-  try {
-    sendFinalReply(reply_message);
-  } catch (error) {
-    console.error("Erro ao obter a resposta da OpenAI:", error);
-    sendFinalReply("Desculpe, houve um problema ao processar sua solicitação.");
-  }
-}
 
 async function fetchMediaUrl(mediaId) {
   try {
@@ -1319,21 +1268,6 @@ async function extractTextFromPdf(pdfContent) {
   }
 }
 
-async function getOpenAIResponse(content) {
-  try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        { role: "user", content: content }
-      ],
-      max_tokens: 2000
-    });
-    return response.choices[0].message.content;
-  } catch (error) {
-    console.error("Error getting OpenAI response:", error);
-    throw error;
-  }
-}
 
 async function downloadAudio(url) {
   try {
